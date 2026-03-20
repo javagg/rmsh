@@ -1,13 +1,12 @@
-use std::sync::{Arc, Mutex};
-
 use eframe::egui_wgpu;
 use rmsh_model::Mesh;
 use rmsh_renderer::{RenderConfig, Scene};
 
+use crate::io::{
+    default_save_name, drain_io_events, new_io_queue, request_open_dialog, request_open_path,
+    request_save_dialog, IoEvent, IoQueue, MshSaveFormat,
+};
 use crate::viewport::ViewportCallback;
-
-/// Pending file loaded asynchronously (file_name, file_bytes).
-type PendingFile = Arc<Mutex<Option<(String, Vec<u8>)>>>;
 
 /// The main application state.
 pub struct RmshApp {
@@ -23,8 +22,8 @@ pub struct RmshApp {
     scene_initialized: bool,
     /// Cached wgpu render state.
     render_state: Option<egui_wgpu::RenderState>,
-    /// Pending file from async file dialog (web) or sync fallback.
-    pending_file: PendingFile,
+    /// Pending IO events from dialogs and drag-and-drop.
+    io_queue: IoQueue,
 }
 
 impl RmshApp {
@@ -50,26 +49,11 @@ impl RmshApp {
             mesh_info: String::new(),
             scene_initialized: false,
             render_state,
-            pending_file: Arc::new(Mutex::new(None)),
+            io_queue: new_io_queue(),
         }
     }
 
-    fn load_mesh_file(&mut self, path: &std::path::Path) -> anyhow::Result<()> {
-        let mesh = rmsh_io::load_msh_from_path(path)?;
-        let file_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-        self.mesh_info = format!(
-            "Nodes: {}  Elements: {}  File: {}",
-            mesh.node_count(),
-            mesh.element_count(),
-            file_name
-        );
-        self.mesh = Some(mesh);
-        self.mesh_name = Some(file_name);
-        self.scene_initialized = false;
-        Ok(())
-    }
-
-    fn load_mesh_from_bytes(&mut self, file_name: &str, data: &[u8]) -> anyhow::Result<()> {
+    fn apply_loaded_mesh(&mut self, file_name: &str, data: &[u8]) -> anyhow::Result<()> {
         let mesh = rmsh_io::load_msh_from_bytes(data)?;
         self.mesh_info = format!(
             "Nodes: {}  Elements: {}  File: {}",
@@ -115,12 +99,17 @@ impl RmshApp {
 
 impl eframe::App for RmshApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Check for pending file from async dialog
-        let pending_data = self.pending_file.lock().ok().and_then(|mut p| p.take());
-        if let Some((file_name, data)) = pending_data {
-            match self.load_mesh_from_bytes(&file_name, &data) {
-                Ok(()) => log::info!("Loaded mesh: {}", file_name),
-                Err(e) => log::error!("Failed to load mesh: {}", e),
+        for event in drain_io_events(&self.io_queue) {
+            match event {
+                IoEvent::MeshLoaded { file_name, data } => {
+                    match self.apply_loaded_mesh(&file_name, &data) {
+                        Ok(()) => log::info!("Loaded mesh: {}", file_name),
+                        Err(e) => log::error!("Failed to load mesh: {}", e),
+                    }
+                }
+                IoEvent::Error(message) => {
+                    log::error!("{}", message);
+                }
             }
         }
 
@@ -139,10 +128,7 @@ impl eframe::App for RmshApp {
         ctx.input(|i| {
             if !i.raw.dropped_files.is_empty() {
                 if let Some(path) = i.raw.dropped_files[0].path.as_ref() {
-                    match self.load_mesh_file(path) {
-                        Ok(()) => log::info!("Loaded mesh: {}", path.display()),
-                        Err(e) => log::error!("Failed to load mesh: {}", e),
-                    }
+                    request_open_path(path.clone(), self.io_queue.clone(), ctx.clone());
                 }
             }
         });
@@ -152,7 +138,7 @@ impl eframe::App for RmshApp {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("Open MSH...").clicked() {
-                        open_msh_async(self.pending_file.clone(), ctx.clone());
+                        request_open_dialog(self.io_queue.clone(), ctx.clone());
                         ui.close_menu();
                     }
                     if ui
@@ -161,7 +147,7 @@ impl eframe::App for RmshApp {
                     {
                         if let Some(mesh) = self.mesh.as_ref() {
                             let file_name = default_save_name(self.mesh_name.as_deref(), MshSaveFormat::V4);
-                            save_msh_async(mesh.clone(), file_name, MshSaveFormat::V4);
+                            request_save_dialog(mesh.clone(), file_name, MshSaveFormat::V4);
                         }
                         ui.close_menu();
                     }
@@ -171,7 +157,7 @@ impl eframe::App for RmshApp {
                     {
                         if let Some(mesh) = self.mesh.as_ref() {
                             let file_name = default_save_name(self.mesh_name.as_deref(), MshSaveFormat::V2);
-                            save_msh_async(mesh.clone(), file_name, MshSaveFormat::V2);
+                            request_save_dialog(mesh.clone(), file_name, MshSaveFormat::V2);
                         }
                         ui.close_menu();
                     }
@@ -293,90 +279,4 @@ fn handle_camera_input(
     }
 
     needs_repaint
-}
-
-fn open_msh_async(pending_file: PendingFile, ctx: egui::Context) {
-    spawn_dialog_task(async move {
-        let file = rfd::AsyncFileDialog::new()
-            .add_filter("Gmsh Mesh", &["msh"])
-            .add_filter("All Files", &["*"])
-            .set_title("Open Mesh File")
-            .pick_file()
-            .await;
-
-        if let Some(file) = file {
-            let file_name = file.file_name();
-            let data = file.read().await;
-            if let Ok(mut pending) = pending_file.lock() {
-                *pending = Some((file_name, data));
-            }
-            ctx.request_repaint();
-        }
-    });
-}
-
-#[derive(Clone, Copy)]
-enum MshSaveFormat {
-    V2,
-    V4,
-}
-
-fn default_save_name(mesh_name: Option<&str>, format: MshSaveFormat) -> String {
-    let stem = mesh_name
-        .and_then(|name| std::path::Path::new(name).file_stem())
-        .and_then(|stem| stem.to_str())
-        .filter(|stem| !stem.is_empty())
-        .unwrap_or("mesh");
-    match format {
-        MshSaveFormat::V2 => format!("{}_v2.msh", stem),
-        MshSaveFormat::V4 => format!("{}_v4.msh", stem),
-    }
-}
-
-fn save_msh_async(mesh: Mesh, file_name: String, format: MshSaveFormat) {
-    spawn_dialog_task(async move {
-        let mut data = Vec::new();
-        let write_result = match format {
-            MshSaveFormat::V2 => rmsh_io::write_msh_v2(&mut data, &mesh),
-            MshSaveFormat::V4 => rmsh_io::write_msh_v4(&mut data, &mesh),
-        };
-
-        if let Err(error) = write_result {
-            log::error!("Failed to serialize mesh: {}", error);
-            return;
-        }
-
-        let file_handle = rfd::AsyncFileDialog::new()
-            .add_filter("Gmsh Mesh", &["msh"])
-            .set_file_name(&file_name)
-            .set_title("Save Mesh File")
-            .save_file()
-            .await;
-
-        if let Some(file_handle) = file_handle {
-            if let Err(error) = file_handle.write(&data).await {
-                log::error!("Failed to save mesh: {}", error);
-            } else {
-                log::info!("Saved mesh: {}", file_name);
-            }
-        }
-    });
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn spawn_dialog_task<F>(future: F)
-where
-    F: std::future::Future<Output = ()> + Send + 'static,
-{
-    std::thread::spawn(move || {
-        pollster::block_on(future);
-    });
-}
-
-#[cfg(target_arch = "wasm32")]
-fn spawn_dialog_task<F>(future: F)
-where
-    F: std::future::Future<Output = ()> + 'static,
-{
-    wasm_bindgen_futures::spawn_local(future);
 }

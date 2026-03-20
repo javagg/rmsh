@@ -1,4 +1,5 @@
 mod app;
+mod io;
 mod viewport;
 // #[cfg(target_arch = "wasm32")]
 // mod web;
