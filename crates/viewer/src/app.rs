@@ -13,6 +13,8 @@ type PendingFile = Arc<Mutex<Option<(String, Vec<u8>)>>>;
 pub struct RmshApp {
     /// Currently loaded mesh.
     mesh: Option<Mesh>,
+    /// Last opened mesh file name, if any.
+    mesh_name: Option<String>,
     /// Render configuration (what to show).
     config: RenderConfig,
     /// Mesh info string for status bar.
@@ -43,6 +45,7 @@ impl RmshApp {
 
         Self {
             mesh: None,
+            mesh_name: None,
             config: RenderConfig::default(),
             mesh_info: String::new(),
             scene_initialized: false,
@@ -52,23 +55,8 @@ impl RmshApp {
     }
 
     fn load_mesh_file(&mut self, path: &std::path::Path) -> anyhow::Result<()> {
-        let file = std::fs::File::open(path)?;
-        let reader = std::io::BufReader::new(file);
-        let mesh = rmsh_algo::parse_msh(reader)?;
-        self.mesh_info = format!(
-            "Nodes: {}  Elements: {}  File: {}",
-            mesh.node_count(),
-            mesh.element_count(),
-            path.file_name().unwrap_or_default().to_string_lossy()
-        );
-        self.mesh = Some(mesh);
-        self.scene_initialized = false;
-        Ok(())
-    }
-
-    fn load_mesh_from_bytes(&mut self, file_name: &str, data: &[u8]) -> anyhow::Result<()> {
-        let reader = std::io::BufReader::new(data);
-        let mesh = rmsh_algo::parse_msh(reader)?;
+        let mesh = rmsh_io::load_msh_from_path(path)?;
+        let file_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
         self.mesh_info = format!(
             "Nodes: {}  Elements: {}  File: {}",
             mesh.node_count(),
@@ -76,6 +64,21 @@ impl RmshApp {
             file_name
         );
         self.mesh = Some(mesh);
+        self.mesh_name = Some(file_name);
+        self.scene_initialized = false;
+        Ok(())
+    }
+
+    fn load_mesh_from_bytes(&mut self, file_name: &str, data: &[u8]) -> anyhow::Result<()> {
+        let mesh = rmsh_io::load_msh_from_bytes(data)?;
+        self.mesh_info = format!(
+            "Nodes: {}  Elements: {}  File: {}",
+            mesh.node_count(),
+            mesh.element_count(),
+            file_name
+        );
+        self.mesh = Some(mesh);
+        self.mesh_name = Some(file_name.to_string());
         self.scene_initialized = false;
         Ok(())
     }
@@ -149,18 +152,26 @@ impl eframe::App for RmshApp {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("Open MSH...").clicked() {
-                        #[cfg(not(target_arch = "wasm32"))]
-                        {
-                            if let Some(path) = rfd_open_msh() {
-                                match self.load_mesh_file(&path) {
-                                    Ok(()) => log::info!("Loaded mesh: {}", path.display()),
-                                    Err(e) => log::error!("Failed to load mesh: {}", e),
-                                }
-                            }
+                        open_msh_async(self.pending_file.clone(), ctx.clone());
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(self.mesh.is_some(), egui::Button::new("Save As MSH 4.1..."))
+                        .clicked()
+                    {
+                        if let Some(mesh) = self.mesh.as_ref() {
+                            let file_name = default_save_name(self.mesh_name.as_deref(), MshSaveFormat::V4);
+                            save_msh_async(mesh.clone(), file_name, MshSaveFormat::V4);
                         }
-                        #[cfg(target_arch = "wasm32")]
-                        {
-                            open_msh_async(self.pending_file.clone(), ctx.clone());
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(self.mesh.is_some(), egui::Button::new("Save As MSH 2.2..."))
+                        .clicked()
+                    {
+                        if let Some(mesh) = self.mesh.as_ref() {
+                            let file_name = default_save_name(self.mesh_name.as_deref(), MshSaveFormat::V2);
+                            save_msh_async(mesh.clone(), file_name, MshSaveFormat::V2);
                         }
                         ui.close_menu();
                     }
@@ -284,22 +295,11 @@ fn handle_camera_input(
     needs_repaint
 }
 
-/// Open a file dialog to select an MSH file (native only).
-#[cfg(not(target_arch = "wasm32"))]
-fn rfd_open_msh() -> Option<std::path::PathBuf> {
-    rfd::FileDialog::new()
-        .add_filter("Gmsh Mesh", &["msh"])
-        .add_filter("All Files", &["*"])
-        .set_title("Open Mesh File")
-        .pick_file()
-}
-
-/// Open an async file dialog for web, read the file and store it in pending_file.
-#[cfg(target_arch = "wasm32")]
 fn open_msh_async(pending_file: PendingFile, ctx: egui::Context) {
-    wasm_bindgen_futures::spawn_local(async move {
+    spawn_dialog_task(async move {
         let file = rfd::AsyncFileDialog::new()
             .add_filter("Gmsh Mesh", &["msh"])
+            .add_filter("All Files", &["*"])
             .set_title("Open Mesh File")
             .pick_file()
             .await;
@@ -313,4 +313,70 @@ fn open_msh_async(pending_file: PendingFile, ctx: egui::Context) {
             ctx.request_repaint();
         }
     });
+}
+
+#[derive(Clone, Copy)]
+enum MshSaveFormat {
+    V2,
+    V4,
+}
+
+fn default_save_name(mesh_name: Option<&str>, format: MshSaveFormat) -> String {
+    let stem = mesh_name
+        .and_then(|name| std::path::Path::new(name).file_stem())
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or("mesh");
+    match format {
+        MshSaveFormat::V2 => format!("{}_v2.msh", stem),
+        MshSaveFormat::V4 => format!("{}_v4.msh", stem),
+    }
+}
+
+fn save_msh_async(mesh: Mesh, file_name: String, format: MshSaveFormat) {
+    spawn_dialog_task(async move {
+        let mut data = Vec::new();
+        let write_result = match format {
+            MshSaveFormat::V2 => rmsh_io::write_msh_v2(&mut data, &mesh),
+            MshSaveFormat::V4 => rmsh_io::write_msh_v4(&mut data, &mesh),
+        };
+
+        if let Err(error) = write_result {
+            log::error!("Failed to serialize mesh: {}", error);
+            return;
+        }
+
+        let file_handle = rfd::AsyncFileDialog::new()
+            .add_filter("Gmsh Mesh", &["msh"])
+            .set_file_name(&file_name)
+            .set_title("Save Mesh File")
+            .save_file()
+            .await;
+
+        if let Some(file_handle) = file_handle {
+            if let Err(error) = file_handle.write(&data).await {
+                log::error!("Failed to save mesh: {}", error);
+            } else {
+                log::info!("Saved mesh: {}", file_name);
+            }
+        }
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_dialog_task<F>(future: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    std::thread::spawn(move || {
+        pollster::block_on(future);
+    });
+}
+
+#[cfg(target_arch = "wasm32")]
+fn spawn_dialog_task<F>(future: F)
+where
+    F: std::future::Future<Output = ()> + 'static,
+{
+    wasm_bindgen_futures::spawn_local(future);
 }

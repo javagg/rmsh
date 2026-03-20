@@ -1,3 +1,2 @@
-pub mod msh;
+pub use rmsh_io::{parse_msh, MshError};
 
-pub use msh::parse_msh;

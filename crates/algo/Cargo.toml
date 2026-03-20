@@ -4,6 +4,4 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-rmsh-model = { workspace = true }
-thiserror = { workspace = true }
-log = { workspace = true }
+rmsh-io = { workspace = true }

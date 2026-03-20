@@ -1,4 +1,7 @@
-use std::io::BufRead;
+use std::collections::BTreeMap;
+use std::fs::File;
+use std::io::{BufRead, BufReader, Cursor, Write};
+use std::path::Path;
 
 use rmsh_model::{Element, ElementType, Mesh, Node};
 use thiserror::Error;
@@ -11,13 +14,175 @@ pub enum MshError {
     Parse { line: usize, message: String },
     #[error("Unsupported MSH format version: {0}")]
     UnsupportedVersion(String),
+    #[error("Unsupported element type for MSH write: {0:?}")]
+    UnsupportedElementType(ElementType),
+    #[error("Element references missing node ID: {0}")]
+    MissingNode(u64),
 }
 
-/// MSH format major version.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum MshVersion {
     V2,
     V4,
+}
+
+pub fn load_msh_from_path(path: &Path) -> Result<Mesh, MshError> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    parse_msh(reader)
+}
+
+pub fn load_msh_from_bytes(data: &[u8]) -> Result<Mesh, MshError> {
+    parse_msh(Cursor::new(data))
+}
+
+pub fn save_msh_v2_to_path(path: &Path, mesh: &Mesh) -> Result<(), MshError> {
+    let mut file = File::create(path)?;
+    write_msh_v2(&mut file, mesh)
+}
+
+pub fn save_msh_v4_to_path(path: &Path, mesh: &Mesh) -> Result<(), MshError> {
+    let mut file = File::create(path)?;
+    write_msh_v4(&mut file, mesh)
+}
+
+pub fn write_msh_v2<W: Write>(writer: &mut W, mesh: &Mesh) -> Result<(), MshError> {
+    validate_mesh(mesh)?;
+
+    let nodes = sorted_nodes(mesh);
+    let elements = sorted_elements(mesh);
+
+    writeln!(writer, "$MeshFormat")?;
+    writeln!(writer, "2.2 0 8")?;
+    writeln!(writer, "$EndMeshFormat")?;
+    write_physical_names(writer, mesh)?;
+
+    writeln!(writer, "$Nodes")?;
+    writeln!(writer, "{}", nodes.len())?;
+    for node in nodes {
+        writeln!(
+            writer,
+            "{} {} {} {}",
+            node.id,
+            node.position.x,
+            node.position.y,
+            node.position.z
+        )?;
+    }
+    writeln!(writer, "$EndNodes")?;
+
+    writeln!(writer, "$Elements")?;
+    writeln!(writer, "{}", elements.len())?;
+    for element in elements {
+        let etype = gmsh_type_id(element.etype)?;
+        match element.physical_tag {
+            Some(physical_tag) => {
+                write!(writer, "{} {} 2 {} 0", element.id, etype, physical_tag)?;
+            }
+            None => {
+                write!(writer, "{} {} 0", element.id, etype)?;
+            }
+        }
+        for node_id in &element.node_ids {
+            write!(writer, " {}", node_id)?;
+        }
+        writeln!(writer)?;
+    }
+    writeln!(writer, "$EndElements")?;
+
+    Ok(())
+}
+
+pub fn write_msh_v4<W: Write>(writer: &mut W, mesh: &Mesh) -> Result<(), MshError> {
+    validate_mesh(mesh)?;
+
+    let nodes = sorted_nodes(mesh);
+    let elements = sorted_elements(mesh);
+    let min_node_tag = nodes.first().map(|node| node.id).unwrap_or(0);
+    let max_node_tag = nodes.last().map(|node| node.id).unwrap_or(0);
+    let min_element_tag = elements.first().map(|element| element.id).unwrap_or(0);
+    let max_element_tag = elements.last().map(|element| element.id).unwrap_or(0);
+    let entity_dim = elements
+        .iter()
+        .map(|element| element.dimension() as i32)
+        .max()
+        .unwrap_or(0);
+
+    writeln!(writer, "$MeshFormat")?;
+    writeln!(writer, "4.1 0 8")?;
+    writeln!(writer, "$EndMeshFormat")?;
+    write_physical_names(writer, mesh)?;
+
+    writeln!(writer, "$Nodes")?;
+    if nodes.is_empty() {
+        writeln!(writer, "0 0 0 0")?;
+    } else {
+        writeln!(
+            writer,
+            "1 {} {} {}",
+            nodes.len(),
+            min_node_tag,
+            max_node_tag
+        )?;
+        writeln!(writer, "{} 1 0 {}", entity_dim, nodes.len())?;
+        for node in &nodes {
+            writeln!(writer, "{}", node.id)?;
+        }
+        for node in &nodes {
+            writeln!(
+                writer,
+                "{} {} {}",
+                node.position.x,
+                node.position.y,
+                node.position.z
+            )?;
+        }
+    }
+    writeln!(writer, "$EndNodes")?;
+
+    let mut blocks: BTreeMap<(u8, i32, i32), Vec<&rmsh_model::Element>> = BTreeMap::new();
+    for element in &elements {
+        let gmsh_type = gmsh_type_id(element.etype)?;
+        let entity_tag = element.physical_tag.unwrap_or(1);
+        blocks
+            .entry((element.dimension(), entity_tag, gmsh_type))
+            .or_default()
+            .push(*element);
+    }
+
+    writeln!(writer, "$Elements")?;
+    if elements.is_empty() {
+        writeln!(writer, "0 0 0 0")?;
+    } else {
+        writeln!(
+            writer,
+            "{} {} {} {}",
+            blocks.len(),
+            elements.len(),
+            min_element_tag,
+            max_element_tag
+        )?;
+        for ((dimension, entity_tag, gmsh_type), block_elements) in blocks {
+            writeln!(
+                writer,
+                "{} {} {} {}",
+                dimension,
+                entity_tag,
+                gmsh_type,
+                block_elements.len()
+            )?;
+            for element in block_elements {
+                write!(writer, "{}", element.id)?;
+                for node_id in &element.node_ids {
+                    write!(writer, " {}", node_id)?;
+                }
+                writeln!(writer)?;
+            }
+        }
+    }
+    writeln!(writer, "$EndElements")?;
+
+    Ok(())
 }
 
 /// Parse a Gmsh MSH file (v2.2 or v4.1 ASCII) from a reader.
@@ -61,8 +226,7 @@ pub fn parse_msh<R: BufRead>(reader: R) -> Result<Mesh, MshError> {
                 } else {
                     return Err(MshError::UnsupportedVersion(ver_str.into()));
                 }
-                // file-type: 0 = ASCII
-                // data-size: typically 8 (double)
+
                 let end = next_line(&mut lines, &mut line_num)?;
                 if end.trim() != "$EndMeshFormat" {
                     return Err(MshError::Parse {
@@ -104,7 +268,6 @@ pub fn parse_msh<R: BufRead>(reader: R) -> Result<Mesh, MshError> {
                 MshVersion::V4 => parse_elements_v4(&mut lines, &mut line_num, &mut mesh)?,
             },
             _ => {
-                // Skip unknown sections — read until matching $End
                 if trimmed.starts_with('$') && !trimmed.starts_with("$End") {
                     let end_tag = format!("$End{}", &trimmed[1..]);
                     loop {
@@ -127,11 +290,6 @@ pub fn parse_msh<R: BufRead>(reader: R) -> Result<Mesh, MshError> {
     Ok(mesh)
 }
 
-/// Parse $Nodes section in MSH 2.2 format.
-/// Format:
-///   num-nodes
-///   node-tag x y z
-///   ...
 fn parse_nodes_v2<R: BufRead>(
     lines: &mut std::io::Lines<R>,
     line_num: &mut usize,
@@ -182,11 +340,6 @@ fn parse_nodes_v2<R: BufRead>(
     Ok(())
 }
 
-/// Parse $Elements section in MSH 2.2 format.
-/// Format:
-///   num-elements
-///   elem-tag elem-type num-tags [tags...] node1 node2 ...
-///   ...
 fn parse_elements_v2<R: BufRead>(
     lines: &mut std::io::Lines<R>,
     line_num: &mut usize,
@@ -220,7 +373,6 @@ fn parse_elements_v2<R: BufRead>(
             message: "Invalid number of tags".into(),
         })?;
 
-        // Skip over tags, node IDs start after (3 + num_tags)
         let node_start = 3 + num_tags;
         if parts.len() < node_start {
             return Err(MshError::Parse {
@@ -230,10 +382,12 @@ fn parse_elements_v2<R: BufRead>(
         }
         let node_ids: Vec<u64> = parts[node_start..]
             .iter()
-            .map(|s| s.parse::<u64>().map_err(|_| MshError::Parse {
-                line: *line_num,
-                message: "Invalid node id in element".into(),
-            }))
+            .map(|s| {
+                s.parse::<u64>().map_err(|_| MshError::Parse {
+                    line: *line_num,
+                    message: "Invalid node id in element".into(),
+                })
+            })
             .collect::<Result<_, _>>()?;
 
         let etype = ElementType::from_gmsh_type_id(element_type_id);
@@ -251,14 +405,6 @@ fn parse_elements_v2<R: BufRead>(
     Ok(())
 }
 
-/// Parse $Nodes section in MSH 4.1 format.
-/// Format:
-///   numEntityBlocks numNodes minNodeTag maxNodeTag
-///   entityDim entityTag parametric numNodesInBlock
-///     nodeTag
-///     ...
-///     x y z
-///     ...
 fn parse_nodes_v4<R: BufRead>(
     lines: &mut std::io::Lines<R>,
     line_num: &mut usize,
@@ -273,7 +419,6 @@ fn parse_nodes_v4<R: BufRead>(
         });
     }
     let num_entity_blocks: usize = parts[0].parse().unwrap_or(0);
-    let _num_nodes: usize = parts[1].parse().unwrap_or(0);
 
     for _ in 0..num_entity_blocks {
         let block_header = next_line_raw(lines, line_num)?;
@@ -284,12 +429,8 @@ fn parse_nodes_v4<R: BufRead>(
                 message: "Invalid node block header".into(),
             });
         }
-        let _entity_dim: i32 = bp[0].parse().unwrap_or(0);
-        let _entity_tag: i32 = bp[1].parse().unwrap_or(0);
-        let _parametric: i32 = bp[2].parse().unwrap_or(0);
         let num_in_block: usize = bp[3].parse().unwrap_or(0);
 
-        // Read node tags
         let mut tags = Vec::with_capacity(num_in_block);
         for _ in 0..num_in_block {
             let tag_line = next_line_raw(lines, line_num)?;
@@ -300,7 +441,6 @@ fn parse_nodes_v4<R: BufRead>(
             tags.push(tag);
         }
 
-        // Read coordinates
         for tag in tags {
             let coord_line = next_line_raw(lines, line_num)?;
             let coords: Vec<f64> = coord_line
@@ -325,12 +465,6 @@ fn parse_nodes_v4<R: BufRead>(
     Ok(())
 }
 
-/// Parse $Elements section in MSH 4.1 format.
-/// Format:
-///   numEntityBlocks numElements minElementTag maxElementTag
-///   entityDim entityTag elementType numElementsInBlock
-///     elementTag nodeTag ...
-///     ...
 fn parse_elements_v4<R: BufRead>(
     lines: &mut std::io::Lines<R>,
     line_num: &mut usize,
@@ -355,8 +489,6 @@ fn parse_elements_v4<R: BufRead>(
                 message: "Invalid element block header".into(),
             });
         }
-        let _entity_dim: i32 = bp[0].parse().unwrap_or(0);
-        let _entity_tag: i32 = bp[1].parse().unwrap_or(0);
         let element_type_id: i32 = bp[2].parse().unwrap_or(0);
         let num_in_block: usize = bp[3].parse().unwrap_or(0);
         let etype = ElementType::from_gmsh_type_id(element_type_id);
@@ -414,10 +546,108 @@ fn next_line_raw<R: BufRead>(
         .map_err(MshError::Io)
 }
 
+fn validate_mesh(mesh: &Mesh) -> Result<(), MshError> {
+    for element in &mesh.elements {
+        gmsh_type_id(element.etype)?;
+        for node_id in &element.node_ids {
+            if !mesh.nodes.contains_key(node_id) {
+                return Err(MshError::MissingNode(*node_id));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_physical_names<W: Write>(writer: &mut W, mesh: &Mesh) -> Result<(), MshError> {
+    if mesh.physical_names.is_empty() {
+        return Ok(());
+    }
+
+    let mut physical_names: Vec<_> = mesh.physical_names.iter().collect();
+    physical_names.sort_by_key(|((dim, tag), _)| (*dim, *tag));
+
+    writeln!(writer, "$PhysicalNames")?;
+    writeln!(writer, "{}", physical_names.len())?;
+    for ((dim, tag), name) in physical_names {
+        writeln!(writer, "{} {} \"{}\"", dim, tag, name)?;
+    }
+    writeln!(writer, "$EndPhysicalNames")?;
+
+    Ok(())
+}
+
+fn sorted_nodes(mesh: &Mesh) -> Vec<&rmsh_model::Node> {
+    let mut nodes: Vec<_> = mesh.nodes.values().collect();
+    nodes.sort_by_key(|node| node.id);
+    nodes
+}
+
+fn sorted_elements(mesh: &Mesh) -> Vec<&rmsh_model::Element> {
+    let mut elements: Vec<_> = mesh.elements.iter().collect();
+    elements.sort_by_key(|element| element.id);
+    elements
+}
+
+fn gmsh_type_id(element_type: ElementType) -> Result<i32, MshError> {
+    match element_type {
+        ElementType::Point1 => Ok(15),
+        ElementType::Line2 => Ok(1),
+        ElementType::Triangle3 => Ok(2),
+        ElementType::Quad4 => Ok(3),
+        ElementType::Tetrahedron4 => Ok(4),
+        ElementType::Hexahedron8 => Ok(5),
+        ElementType::Prism6 => Ok(6),
+        ElementType::Pyramid5 => Ok(7),
+        ElementType::Unknown(_) => Err(MshError::UnsupportedElementType(element_type)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    fn sample_mesh() -> Mesh {
+        let mut mesh = Mesh::new();
+        mesh.add_node(Node::new(1, 0.0, 0.0, 0.0));
+        mesh.add_node(Node::new(2, 1.0, 0.0, 0.0));
+        mesh.add_node(Node::new(3, 0.0, 1.0, 0.0));
+        mesh.add_node(Node::new(4, 0.0, 0.0, 1.0));
+
+        let mut tri = Element::new(1, ElementType::Triangle3, vec![1, 2, 3]);
+        tri.physical_tag = Some(11);
+        mesh.add_element(tri);
+        mesh.add_element(Element::new(2, ElementType::Tetrahedron4, vec![1, 2, 3, 4]));
+        mesh.physical_names.insert((2, 11), "surface".to_string());
+        mesh
+    }
+
+    fn assert_mesh_core_eq(actual: &Mesh, expected: &Mesh) {
+        assert_eq!(actual.node_count(), expected.node_count());
+        assert_eq!(actual.element_count(), expected.element_count());
+        assert_eq!(actual.physical_names, expected.physical_names);
+
+        let mut actual_nodes: Vec<_> = actual.nodes.iter().collect();
+        actual_nodes.sort_by_key(|(id, _)| **id);
+        let mut expected_nodes: Vec<_> = expected.nodes.iter().collect();
+        expected_nodes.sort_by_key(|(id, _)| **id);
+        for ((actual_id, actual_node), (expected_id, expected_node)) in
+            actual_nodes.into_iter().zip(expected_nodes)
+        {
+            assert_eq!(actual_id, expected_id);
+            assert_eq!(actual_node.position, expected_node.position);
+        }
+
+        let mut actual_elements: Vec<_> = actual.elements.iter().collect();
+        actual_elements.sort_by_key(|element| element.id);
+        let mut expected_elements: Vec<_> = expected.elements.iter().collect();
+        expected_elements.sort_by_key(|element| element.id);
+        for (actual_element, expected_element) in actual_elements.into_iter().zip(expected_elements) {
+            assert_eq!(actual_element.id, expected_element.id);
+            assert_eq!(actual_element.etype, expected_element.etype);
+            assert_eq!(actual_element.node_ids, expected_element.node_ids);
+        }
+    }
 
     #[test]
     fn test_parse_simple_msh_v4() {
@@ -442,8 +672,7 @@ $Elements
 1 1 2 3 4
 $EndElements
 "#;
-        let cursor = Cursor::new(msh_data);
-        let mesh = parse_msh(cursor.lines().collect::<Result<Vec<_>, _>>().unwrap().join("\n").as_bytes()).unwrap();
+        let mesh = parse_msh(Cursor::new(msh_data.as_bytes())).unwrap();
         assert_eq!(mesh.node_count(), 4);
         assert_eq!(mesh.element_count(), 1);
         assert_eq!(mesh.elements[0].etype, rmsh_model::ElementType::Tetrahedron4);
@@ -467,13 +696,32 @@ $Elements
 2 4 2 0 1 1 2 3 4
 $EndElements
 "#;
-        let cursor = Cursor::new(msh_data);
-        let mesh = parse_msh(cursor.lines().collect::<Result<Vec<_>, _>>().unwrap().join("\n").as_bytes()).unwrap();
+        let mesh = parse_msh(Cursor::new(msh_data.as_bytes())).unwrap();
         assert_eq!(mesh.node_count(), 4);
         assert_eq!(mesh.element_count(), 2);
         assert_eq!(mesh.elements[0].etype, rmsh_model::ElementType::Triangle3);
         assert_eq!(mesh.elements[1].etype, rmsh_model::ElementType::Tetrahedron4);
         assert_eq!(mesh.elements[0].node_ids, vec![1, 2, 3]);
         assert_eq!(mesh.elements[1].node_ids, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_write_roundtrip_msh_v2() {
+        let mesh = sample_mesh();
+        let mut output = Vec::new();
+        write_msh_v2(&mut output, &mesh).unwrap();
+
+        let parsed = parse_msh(Cursor::new(output)).unwrap();
+        assert_mesh_core_eq(&parsed, &mesh);
+    }
+
+    #[test]
+    fn test_write_roundtrip_msh_v4() {
+        let mesh = sample_mesh();
+        let mut output = Vec::new();
+        write_msh_v4(&mut output, &mesh).unwrap();
+
+        let parsed = parse_msh(Cursor::new(output)).unwrap();
+        assert_mesh_core_eq(&parsed, &mesh);
     }
 }
