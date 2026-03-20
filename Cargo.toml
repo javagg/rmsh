@@ -43,6 +43,9 @@ thiserror = "2"
 # Serialization
 serde = { version = "1", features = ["derive"] }
 
+# File dialog
+rfd = "0.15"
+
 # Web
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"

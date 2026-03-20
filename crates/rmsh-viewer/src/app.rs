@@ -1,8 +1,13 @@
+use std::sync::{Arc, Mutex};
+
 use eframe::egui_wgpu;
 use rmsh_model::Mesh;
 use rmsh_renderer::{RenderConfig, Scene};
 
 use crate::viewport::ViewportCallback;
+
+/// Pending file loaded asynchronously (file_name, file_bytes).
+type PendingFile = Arc<Mutex<Option<(String, Vec<u8>)>>>;
 
 /// The main application state.
 pub struct RmshApp {
@@ -16,6 +21,8 @@ pub struct RmshApp {
     scene_initialized: bool,
     /// Cached wgpu render state.
     render_state: Option<egui_wgpu::RenderState>,
+    /// Pending file from async file dialog (web) or sync fallback.
+    pending_file: PendingFile,
 }
 
 impl RmshApp {
@@ -40,6 +47,7 @@ impl RmshApp {
             mesh_info: String::new(),
             scene_initialized: false,
             render_state,
+            pending_file: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -52,6 +60,20 @@ impl RmshApp {
             mesh.node_count(),
             mesh.element_count(),
             path.file_name().unwrap_or_default().to_string_lossy()
+        );
+        self.mesh = Some(mesh);
+        self.scene_initialized = false;
+        Ok(())
+    }
+
+    fn load_mesh_from_bytes(&mut self, file_name: &str, data: &[u8]) -> anyhow::Result<()> {
+        let reader = std::io::BufReader::new(data);
+        let mesh = rmsh_algo::parse_msh(reader)?;
+        self.mesh_info = format!(
+            "Nodes: {}  Elements: {}  File: {}",
+            mesh.node_count(),
+            mesh.element_count(),
+            file_name
         );
         self.mesh = Some(mesh);
         self.scene_initialized = false;
@@ -90,6 +112,15 @@ impl RmshApp {
 
 impl eframe::App for RmshApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Check for pending file from async dialog
+        let pending_data = self.pending_file.lock().ok().and_then(|mut p| p.take());
+        if let Some((file_name, data)) = pending_data {
+            match self.load_mesh_from_bytes(&file_name, &data) {
+                Ok(()) => log::info!("Loaded mesh: {}", file_name),
+                Err(e) => log::error!("Failed to load mesh: {}", e),
+            }
+        }
+
         // Upload mesh to GPU if needed
         if let Some(render_state) = self.render_state.clone() {
             self.upload_mesh_to_gpu(&render_state);
@@ -126,6 +157,10 @@ impl eframe::App for RmshApp {
                                     Err(e) => log::error!("Failed to load mesh: {}", e),
                                 }
                             }
+                        }
+                        #[cfg(target_arch = "wasm32")]
+                        {
+                            open_msh_async(self.pending_file.clone(), ctx.clone());
                         }
                         ui.close_menu();
                     }
@@ -252,7 +287,30 @@ fn handle_camera_input(
 /// Open a file dialog to select an MSH file (native only).
 #[cfg(not(target_arch = "wasm32"))]
 fn rfd_open_msh() -> Option<std::path::PathBuf> {
-    // Simple native file dialog using std
-    // For a full implementation, add `rfd` crate dependency
-    None // Placeholder — users can drag & drop files
+    rfd::FileDialog::new()
+        .add_filter("Gmsh Mesh", &["msh"])
+        .add_filter("All Files", &["*"])
+        .set_title("Open Mesh File")
+        .pick_file()
+}
+
+/// Open an async file dialog for web, read the file and store it in pending_file.
+#[cfg(target_arch = "wasm32")]
+fn open_msh_async(pending_file: PendingFile, ctx: egui::Context) {
+    wasm_bindgen_futures::spawn_local(async move {
+        let file = rfd::AsyncFileDialog::new()
+            .add_filter("Gmsh Mesh", &["msh"])
+            .set_title("Open Mesh File")
+            .pick_file()
+            .await;
+
+        if let Some(file) = file {
+            let file_name = file.file_name();
+            let data = file.read().await;
+            if let Ok(mut pending) = pending_file.lock() {
+                *pending = Some((file_name, data));
+            }
+            ctx.request_repaint();
+        }
+    });
 }
