@@ -1,0 +1,9 @@
+[package]
+name = "rmsh-algo"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rmsh-model = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }

@@ -1,0 +1,55 @@
+[workspace]
+members = [
+    "crates/rmsh-model",
+    "crates/rmsh-geo",
+    "crates/rmsh-algo",
+    "crates/rmsh-renderer",
+    "crates/rmsh-viewer",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# Internal crates
+rmsh-model = { path = "crates/rmsh-model" }
+rmsh-geo = { path = "crates/rmsh-geo" }
+rmsh-algo = { path = "crates/rmsh-algo" }
+rmsh-renderer = { path = "crates/rmsh-renderer" }
+
+# Math
+nalgebra = { version = "0.33", features = ["serde-serialize"] }
+
+# Graphics
+wgpu = "24"
+bytemuck = { version = "1", features = ["derive"] }
+
+# UI
+egui = "0.31"
+eframe = { version = "0.31", default-features = false }
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+
+# Web
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = "0.3"
+
+[profile.release]
+opt-level = 2
+
+[profile.dev.package."*"]
+opt-level = 2

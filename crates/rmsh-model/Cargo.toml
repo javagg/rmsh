@@ -1,0 +1,10 @@
+[package]
+name = "rmsh-model"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nalgebra = { workspace = true }
+serde = { workspace = true }
+bytemuck = { workspace = true }
+thiserror = { workspace = true }

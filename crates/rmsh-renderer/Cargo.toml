@@ -1,0 +1,12 @@
+[package]
+name = "rmsh-renderer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rmsh-model = { workspace = true }
+rmsh-geo = { path = "../rmsh-geo" }
+wgpu = { workspace = true }
+bytemuck = { workspace = true }
+nalgebra = { workspace = true }
+log = { workspace = true }

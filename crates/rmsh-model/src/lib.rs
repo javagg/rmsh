@@ -1,0 +1,12 @@
+pub mod element;
+pub mod mesh;
+pub mod node;
+
+pub use element::{Element, ElementType};
+pub use mesh::Mesh;
+pub use node::Node;
+
+/// 3D point type alias
+pub type Point3 = nalgebra::Point3<f64>;
+/// 3D vector type alias
+pub type Vector3 = nalgebra::Vector3<f64>;
