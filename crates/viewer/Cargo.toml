@@ -9,7 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 rmsh-model = { workspace = true }
-rmsh-geo = { path = "../rmsh-geo" }
+rmsh-geo = {  workspace = true }
 rmsh-algo = { workspace = true }
 rmsh-renderer = { workspace = true }
 egui = { workspace = true }

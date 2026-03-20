@@ -1,10 +1,10 @@
 [workspace]
 members = [
-    "crates/rmsh-model",
-    "crates/rmsh-geo",
-    "crates/rmsh-algo",
-    "crates/rmsh-renderer",
-    "crates/rmsh-viewer",
+    "crates/model",
+    "crates/geo",
+    "crates/algo",
+    "crates/renderer",
+    "crates/viewer",
 ]
 resolver = "2"
 
@@ -16,10 +16,10 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 # Internal crates
-rmsh-model = { path = "crates/rmsh-model" }
-rmsh-geo = { path = "crates/rmsh-geo" }
-rmsh-algo = { path = "crates/rmsh-algo" }
-rmsh-renderer = { path = "crates/rmsh-renderer" }
+rmsh-model = { path = "crates/model" }
+rmsh-geo = { path = "crates/geo" }
+rmsh-algo = { path = "crates/algo" }
+rmsh-renderer = { path = "crates/renderer" }
 
 # Math
 nalgebra = { version = "0.33", features = ["serde-serialize"] }

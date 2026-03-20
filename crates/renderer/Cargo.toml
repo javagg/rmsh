@@ -5,7 +5,7 @@ edition.workspace = true
 
 [dependencies]
 rmsh-model = { workspace = true }
-rmsh-geo = { path = "../rmsh-geo" }
+rmsh-geo = {  workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true }
 nalgebra = { workspace = true }
