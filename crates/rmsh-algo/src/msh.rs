@@ -13,11 +13,19 @@ pub enum MshError {
     UnsupportedVersion(String),
 }
 
-/// Parse a Gmsh MSH v4.1 ASCII file from a reader.
+/// MSH format major version.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MshVersion {
+    V2,
+    V4,
+}
+
+/// Parse a Gmsh MSH file (v2.2 or v4.1 ASCII) from a reader.
 pub fn parse_msh<R: BufRead>(reader: R) -> Result<Mesh, MshError> {
     let mut mesh = Mesh::new();
     let mut lines = reader.lines();
     let mut line_num: usize = 0;
+    let mut version = MshVersion::V4;
 
     let next_line = |lines: &mut std::io::Lines<R>, line_num: &mut usize| -> Result<String, MshError> {
         *line_num += 1;
@@ -45,9 +53,13 @@ pub fn parse_msh<R: BufRead>(reader: R) -> Result<Mesh, MshError> {
                         message: "Empty format line".into(),
                     });
                 }
-                let version = parts[0];
-                if !version.starts_with("4.") {
-                    return Err(MshError::UnsupportedVersion(version.into()));
+                let ver_str = parts[0];
+                if ver_str.starts_with("2.") {
+                    version = MshVersion::V2;
+                } else if ver_str.starts_with("4.") {
+                    version = MshVersion::V4;
+                } else {
+                    return Err(MshError::UnsupportedVersion(ver_str.into()));
                 }
                 // file-type: 0 = ASCII
                 // data-size: typically 8 (double)
@@ -83,12 +95,14 @@ pub fn parse_msh<R: BufRead>(reader: R) -> Result<Mesh, MshError> {
                     });
                 }
             }
-            "$Nodes" => {
-                parse_nodes_v4(&mut lines, &mut line_num, &mut mesh)?;
-            }
-            "$Elements" => {
-                parse_elements_v4(&mut lines, &mut line_num, &mut mesh)?;
-            }
+            "$Nodes" => match version {
+                MshVersion::V2 => parse_nodes_v2(&mut lines, &mut line_num, &mut mesh)?,
+                MshVersion::V4 => parse_nodes_v4(&mut lines, &mut line_num, &mut mesh)?,
+            },
+            "$Elements" => match version {
+                MshVersion::V2 => parse_elements_v2(&mut lines, &mut line_num, &mut mesh)?,
+                MshVersion::V4 => parse_elements_v4(&mut lines, &mut line_num, &mut mesh)?,
+            },
             _ => {
                 // Skip unknown sections — read until matching $End
                 if trimmed.starts_with('$') && !trimmed.starts_with("$End") {
@@ -111,6 +125,130 @@ pub fn parse_msh<R: BufRead>(reader: R) -> Result<Mesh, MshError> {
     );
 
     Ok(mesh)
+}
+
+/// Parse $Nodes section in MSH 2.2 format.
+/// Format:
+///   num-nodes
+///   node-tag x y z
+///   ...
+fn parse_nodes_v2<R: BufRead>(
+    lines: &mut std::io::Lines<R>,
+    line_num: &mut usize,
+    mesh: &mut Mesh,
+) -> Result<(), MshError> {
+    let header = next_line_raw(lines, line_num)?;
+    let num_nodes: usize = header.trim().parse().map_err(|_| MshError::Parse {
+        line: *line_num,
+        message: "Invalid node count".into(),
+    })?;
+
+    for _ in 0..num_nodes {
+        let node_line = next_line_raw(lines, line_num)?;
+        let parts: Vec<&str> = node_line.trim().split_whitespace().collect();
+        if parts.len() < 4 {
+            return Err(MshError::Parse {
+                line: *line_num,
+                message: "Invalid node line, expected: tag x y z".into(),
+            });
+        }
+        let tag: u64 = parts[0].parse().map_err(|_| MshError::Parse {
+            line: *line_num,
+            message: "Invalid node tag".into(),
+        })?;
+        let x: f64 = parts[1].parse().map_err(|_| MshError::Parse {
+            line: *line_num,
+            message: "Invalid node x coordinate".into(),
+        })?;
+        let y: f64 = parts[2].parse().map_err(|_| MshError::Parse {
+            line: *line_num,
+            message: "Invalid node y coordinate".into(),
+        })?;
+        let z: f64 = parts[3].parse().map_err(|_| MshError::Parse {
+            line: *line_num,
+            message: "Invalid node z coordinate".into(),
+        })?;
+        mesh.add_node(Node::new(tag, x, y, z));
+    }
+
+    let end = next_line_raw(lines, line_num)?;
+    if end.trim() != "$EndNodes" {
+        return Err(MshError::Parse {
+            line: *line_num,
+            message: "Expected $EndNodes".into(),
+        });
+    }
+
+    Ok(())
+}
+
+/// Parse $Elements section in MSH 2.2 format.
+/// Format:
+///   num-elements
+///   elem-tag elem-type num-tags [tags...] node1 node2 ...
+///   ...
+fn parse_elements_v2<R: BufRead>(
+    lines: &mut std::io::Lines<R>,
+    line_num: &mut usize,
+    mesh: &mut Mesh,
+) -> Result<(), MshError> {
+    let header = next_line_raw(lines, line_num)?;
+    let num_elements: usize = header.trim().parse().map_err(|_| MshError::Parse {
+        line: *line_num,
+        message: "Invalid element count".into(),
+    })?;
+
+    for _ in 0..num_elements {
+        let elem_line = next_line_raw(lines, line_num)?;
+        let parts: Vec<&str> = elem_line.trim().split_whitespace().collect();
+        if parts.len() < 3 {
+            return Err(MshError::Parse {
+                line: *line_num,
+                message: "Invalid element line".into(),
+            });
+        }
+        let elem_tag: u64 = parts[0].parse().map_err(|_| MshError::Parse {
+            line: *line_num,
+            message: "Invalid element tag".into(),
+        })?;
+        let element_type_id: i32 = parts[1].parse().map_err(|_| MshError::Parse {
+            line: *line_num,
+            message: "Invalid element type".into(),
+        })?;
+        let num_tags: usize = parts[2].parse().map_err(|_| MshError::Parse {
+            line: *line_num,
+            message: "Invalid number of tags".into(),
+        })?;
+
+        // Skip over tags, node IDs start after (3 + num_tags)
+        let node_start = 3 + num_tags;
+        if parts.len() < node_start {
+            return Err(MshError::Parse {
+                line: *line_num,
+                message: "Element line too short for tags".into(),
+            });
+        }
+        let node_ids: Vec<u64> = parts[node_start..]
+            .iter()
+            .map(|s| s.parse::<u64>().map_err(|_| MshError::Parse {
+                line: *line_num,
+                message: "Invalid node id in element".into(),
+            }))
+            .collect::<Result<_, _>>()?;
+
+        let etype = ElementType::from_gmsh_type_id(element_type_id);
+        mesh.add_element(Element::new(elem_tag, etype, node_ids));
+    }
+
+    let end = next_line_raw(lines, line_num)?;
+    if end.trim() != "$EndElements" {
+        return Err(MshError::Parse {
+            line: *line_num,
+            message: "Expected $EndElements".into(),
+        });
+    }
+
+    Ok(())
 }
 
 /// Parse $Nodes section in MSH 4.1 format.
@@ -282,7 +420,7 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
-    fn test_parse_simple_msh() {
+    fn test_parse_simple_msh_v4() {
         let msh_data = r#"$MeshFormat
 4.1 0 8
 $EndMeshFormat
@@ -309,5 +447,33 @@ $EndElements
         assert_eq!(mesh.node_count(), 4);
         assert_eq!(mesh.element_count(), 1);
         assert_eq!(mesh.elements[0].etype, rmsh_model::ElementType::Tetrahedron4);
+    }
+
+    #[test]
+    fn test_parse_simple_msh_v2() {
+        let msh_data = r#"$MeshFormat
+2.2 0 8
+$EndMeshFormat
+$Nodes
+4
+1 0.0 0.0 0.0
+2 1.0 0.0 0.0
+3 0.0 1.0 0.0
+4 0.0 0.0 1.0
+$EndNodes
+$Elements
+2
+1 2 2 0 1 1 2 3
+2 4 2 0 1 1 2 3 4
+$EndElements
+"#;
+        let cursor = Cursor::new(msh_data);
+        let mesh = parse_msh(cursor.lines().collect::<Result<Vec<_>, _>>().unwrap().join("\n").as_bytes()).unwrap();
+        assert_eq!(mesh.node_count(), 4);
+        assert_eq!(mesh.element_count(), 2);
+        assert_eq!(mesh.elements[0].etype, rmsh_model::ElementType::Triangle3);
+        assert_eq!(mesh.elements[1].etype, rmsh_model::ElementType::Tetrahedron4);
+        assert_eq!(mesh.elements[0].node_ids, vec![1, 2, 3]);
+        assert_eq!(mesh.elements[1].node_ids, vec![1, 2, 3, 4]);
     }
 }
