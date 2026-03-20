@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use rmsh_model::Mesh;
+use rmsh_model::{Mesh, Topology, TopoSelection};
 
 /// Extracted surface data ready for rendering.
 pub struct SurfaceData {
@@ -158,5 +158,100 @@ fn compute_normal(a: &[f32; 3], b: &[f32; 3], c: &[f32; 3]) -> [f32; 3] {
         [n[0] / len, n[1] / len, n[2] / len]
     } else {
         [0.0, 0.0, 1.0]
+    }
+}
+
+/// Extract highlight surface and wireframe for a selected topology entity.
+pub fn extract_highlight(
+    mesh: &Mesh,
+    topo: &Topology,
+    selection: &TopoSelection,
+) -> (Option<SurfaceData>, Option<WireframeData>) {
+    let get_pos = |node_id: u64| -> [f32; 3] {
+        let node = &mesh.nodes[&node_id];
+        [node.position.x as f32, node.position.y as f32, node.position.z as f32]
+    };
+
+    match *selection {
+        TopoSelection::Face(id) => {
+            if let Some(tface) = topo.faces.get(id) {
+                let mut positions = Vec::new();
+                let mut normals = Vec::new();
+                let mut indices = Vec::new();
+                for face_nodes in &tface.mesh_faces {
+                    add_face_triangles(face_nodes, &get_pos, &mut positions, &mut normals, &mut indices);
+                }
+                let surface = if indices.is_empty() {
+                    None
+                } else {
+                    Some(SurfaceData { positions, normals, indices })
+                };
+                (surface, None)
+            } else {
+                (None, None)
+            }
+        }
+        TopoSelection::Edge(id) => {
+            if let Some(tedge) = topo.edges.get(id) {
+                let mut positions = Vec::new();
+                let mut indices = Vec::new();
+                for pair in tedge.node_ids.windows(2) {
+                    let idx = positions.len() as u32;
+                    positions.push(get_pos(pair[0]));
+                    positions.push(get_pos(pair[1]));
+                    indices.push(idx);
+                    indices.push(idx + 1);
+                }
+                let wireframe = if indices.is_empty() {
+                    None
+                } else {
+                    Some(WireframeData { positions, indices })
+                };
+                (None, wireframe)
+            } else {
+                (None, None)
+            }
+        }
+        TopoSelection::Volume(id) => {
+            if let Some(tvol) = topo.volumes.get(id) {
+                // Highlight all boundary faces of this volume's elements
+                let elem_ids: HashSet<u64> = tvol.element_ids.iter().copied().collect();
+                let vol_elements: Vec<_> = mesh.elements.iter().filter(|e| elem_ids.contains(&e.id)).collect();
+
+                let mut face_count: HashMap<Vec<u64>, (Vec<u64>, usize)> = HashMap::new();
+                for elem in &vol_elements {
+                    for face_local in elem.etype.faces() {
+                        let face_nodes: Vec<u64> = face_local.iter().map(|&i| elem.node_ids[i]).collect();
+                        let mut sorted = face_nodes.clone();
+                        sorted.sort();
+                        let entry = face_count.entry(sorted).or_insert((face_nodes.clone(), 0));
+                        entry.1 += 1;
+                    }
+                }
+
+                let mut positions = Vec::new();
+                let mut normals = Vec::new();
+                let mut indices = Vec::new();
+                for (_, (face_nodes, count)) in &face_count {
+                    if *count == 1 {
+                        add_face_triangles(face_nodes, &get_pos, &mut positions, &mut normals, &mut indices);
+                    }
+                }
+                let surface = if indices.is_empty() {
+                    None
+                } else {
+                    Some(SurfaceData { positions, normals, indices })
+                };
+                (surface, None)
+            } else {
+                (None, None)
+            }
+        }
+        TopoSelection::Vertex(id) => {
+            // For a vertex, we don't render surface/wireframe highlight.
+            // Could render a point, but that uses a different pipeline.
+            let _ = id;
+            (None, None)
+        }
     }
 }

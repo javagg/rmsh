@@ -221,3 +221,106 @@ pub fn create_uniform_bind_group_layout(device: &Device) -> BindGroupLayout {
         }],
     })
 }
+
+/// Create the highlight surface pipeline (selected faces drawn on top in highlight color).
+pub fn create_highlight_surface_pipeline(
+    device: &Device,
+    format: TextureFormat,
+    bind_group_layout: &BindGroupLayout,
+) -> RenderPipeline {
+    let shader = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("highlight_shader"),
+        source: ShaderSource::Wgsl(include_str!("../shaders/highlight.wgsl").into()),
+    });
+
+    let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: Some("highlight_pipeline_layout"),
+        bind_group_layouts: &[bind_group_layout],
+        push_constant_ranges: &[],
+    });
+
+    device.create_render_pipeline(&RenderPipelineDescriptor {
+        label: Some("highlight_surface_pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &[VertexBufferLayout {
+                array_stride: std::mem::size_of::<[f32; 6]>() as BufferAddress,
+                step_mode: VertexStepMode::Vertex,
+                attributes: &vertex_attr_array![0 => Float32x3, 1 => Float32x3],
+            }],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(ColorTargetState {
+                format,
+                blend: Some(BlendState::ALPHA_BLENDING),
+                write_mask: ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: PrimitiveState {
+            topology: PrimitiveTopology::TriangleList,
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    })
+}
+
+/// Create the highlight wireframe pipeline (selected edges drawn in highlight color).
+pub fn create_highlight_wireframe_pipeline(
+    device: &Device,
+    format: TextureFormat,
+    bind_group_layout: &BindGroupLayout,
+) -> RenderPipeline {
+    let shader = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("highlight_wire_shader"),
+        source: ShaderSource::Wgsl(include_str!("../shaders/wireframe.wgsl").into()),
+    });
+
+    let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: Some("highlight_wire_pipeline_layout"),
+        bind_group_layouts: &[bind_group_layout],
+        push_constant_ranges: &[],
+    });
+
+    device.create_render_pipeline(&RenderPipelineDescriptor {
+        label: Some("highlight_wireframe_pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &[VertexBufferLayout {
+                array_stride: std::mem::size_of::<[f32; 3]>() as BufferAddress,
+                step_mode: VertexStepMode::Vertex,
+                attributes: &vertex_attr_array![0 => Float32x3],
+            }],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(ColorTargetState {
+                format,
+                blend: Some(BlendState::REPLACE),
+                write_mask: ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: PrimitiveState {
+            topology: PrimitiveTopology::LineList,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    })
+}

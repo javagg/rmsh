@@ -22,6 +22,14 @@ pub struct MeshPointsGpu {
     pub vertex_count: u32,
 }
 
+/// GPU buffers for highlight overlay (selected topo entity).
+pub struct HighlightGpu {
+    /// Triangle surface highlight (same layout as MeshSurfaceGpu).
+    pub surface: Option<MeshSurfaceGpu>,
+    /// Wireframe highlight (same layout as MeshWireframeGpu).
+    pub wireframe: Option<MeshWireframeGpu>,
+}
+
 impl MeshSurfaceGpu {
     pub fn from_surface_data(device: &wgpu::Device, data: &SurfaceData) -> Option<Self> {
         if data.indices.is_empty() {

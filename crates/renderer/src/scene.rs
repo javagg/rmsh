@@ -2,7 +2,7 @@ use wgpu::util::DeviceExt;
 
 use crate::camera::OrbitCamera;
 use crate::gizmo::AxisGizmo;
-use crate::mesh_render::{MeshPointsGpu, MeshSurfaceGpu, MeshWireframeGpu};
+use crate::mesh_render::{HighlightGpu, MeshPointsGpu, MeshSurfaceGpu, MeshWireframeGpu};
 use crate::pipeline;
 use crate::uniform::ViewUniforms;
 
@@ -51,6 +51,8 @@ pub struct Scene {
     wireframe_pipeline: wgpu::RenderPipeline,
     point_pipeline: wgpu::RenderPipeline,
     gizmo_pipeline: wgpu::RenderPipeline,
+    highlight_surface_pipeline: wgpu::RenderPipeline,
+    highlight_wireframe_pipeline: wgpu::RenderPipeline,
 
     // Gizmo
     gizmo: AxisGizmo,
@@ -61,6 +63,9 @@ pub struct Scene {
     pub surface_gpu: Option<MeshSurfaceGpu>,
     pub wireframe_gpu: Option<MeshWireframeGpu>,
     pub points_gpu: Option<MeshPointsGpu>,
+
+    // Highlight GPU data (selected topology entity)
+    pub highlight_gpu: Option<HighlightGpu>,
 }
 
 impl Scene {
@@ -101,6 +106,8 @@ impl Scene {
         let wireframe_pipeline = pipeline::create_wireframe_pipeline(device, target_format, &bind_group_layout);
         let point_pipeline = pipeline::create_point_pipeline(device, target_format, &bind_group_layout);
         let gizmo_pipeline = pipeline::create_gizmo_pipeline(device, target_format, &bind_group_layout);
+        let highlight_surface_pipeline = pipeline::create_highlight_surface_pipeline(device, target_format, &bind_group_layout);
+        let highlight_wireframe_pipeline = pipeline::create_highlight_wireframe_pipeline(device, target_format, &bind_group_layout);
 
         let gizmo = AxisGizmo::new(device);
 
@@ -113,12 +120,15 @@ impl Scene {
             wireframe_pipeline,
             point_pipeline,
             gizmo_pipeline,
+            highlight_surface_pipeline,
+            highlight_wireframe_pipeline,
             gizmo,
             gizmo_uniform_buffer,
             gizmo_bind_group,
             surface_gpu: None,
             wireframe_gpu: None,
             points_gpu: None,
+            highlight_gpu: None,
         }
     }
 
@@ -194,5 +204,38 @@ impl Scene {
 
     pub fn gizmo_vertex_count(&self) -> u32 {
         self.gizmo.vertex_count()
+    }
+
+    pub fn highlight_surface_pipeline(&self) -> &wgpu::RenderPipeline {
+        &self.highlight_surface_pipeline
+    }
+
+    pub fn highlight_wireframe_pipeline(&self) -> &wgpu::RenderPipeline {
+        &self.highlight_wireframe_pipeline
+    }
+
+    /// Upload highlight geometry for a selected topology entity.
+    pub fn upload_highlight(
+        &mut self,
+        device: &wgpu::Device,
+        surface: Option<&rmsh_geo::extract::SurfaceData>,
+        wireframe: Option<&rmsh_geo::extract::WireframeData>,
+    ) {
+        let hl_surface = surface.and_then(|s| MeshSurfaceGpu::from_surface_data(device, s));
+        let hl_wireframe = wireframe.and_then(|w| MeshWireframeGpu::from_wireframe_data(device, w));
+
+        if hl_surface.is_some() || hl_wireframe.is_some() {
+            self.highlight_gpu = Some(HighlightGpu {
+                surface: hl_surface,
+                wireframe: hl_wireframe,
+            });
+        } else {
+            self.highlight_gpu = None;
+        }
+    }
+
+    /// Clear highlight.
+    pub fn clear_highlight(&mut self) {
+        self.highlight_gpu = None;
     }
 }

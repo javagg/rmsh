@@ -82,6 +82,24 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
             }
         }
 
+        // Render highlight overlay (selected topology entity)
+        if let Some(ref hl) = scene.highlight_gpu {
+            if let Some(ref surface) = hl.surface {
+                render_pass.set_pipeline(scene.highlight_surface_pipeline());
+                render_pass.set_bind_group(0, scene.uniform_bind_group(), &[]);
+                render_pass.set_vertex_buffer(0, surface.vertex_buffer.slice(..));
+                render_pass.set_index_buffer(surface.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..surface.index_count, 0, 0..1);
+            }
+            if let Some(ref wireframe) = hl.wireframe {
+                render_pass.set_pipeline(scene.highlight_wireframe_pipeline());
+                render_pass.set_bind_group(0, scene.uniform_bind_group(), &[]);
+                render_pass.set_vertex_buffer(0, wireframe.vertex_buffer.slice(..));
+                render_pass.set_index_buffer(wireframe.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..wireframe.index_count, 0, 0..1);
+            }
+        }
+
         // Render gizmo in bottom-left corner
         if scene.config.show_gizmo {
             let gizmo_size = 80u32;

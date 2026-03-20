@@ -1,5 +1,5 @@
 use eframe::egui_wgpu;
-use rmsh_model::Mesh;
+use rmsh_model::{Mesh, Topology, TopoSelection};
 use rmsh_renderer::{RenderConfig, Scene};
 
 use crate::io::{
@@ -24,6 +24,14 @@ pub struct RmshApp {
     render_state: Option<egui_wgpu::RenderState>,
     /// Pending IO events from dialogs and drag-and-drop.
     io_queue: IoQueue,
+    /// Classified topology.
+    topology: Option<Topology>,
+    /// Currently selected topology entity.
+    topo_selection: Option<TopoSelection>,
+    /// Whether the highlight GPU data needs to be re-uploaded.
+    highlight_dirty: bool,
+    /// Dihedral angle threshold for topology classification (degrees).
+    angle_threshold_deg: f64,
 }
 
 impl RmshApp {
@@ -50,6 +58,10 @@ impl RmshApp {
             scene_initialized: false,
             render_state,
             io_queue: new_io_queue(),
+            topology: None,
+            topo_selection: None,
+            highlight_dirty: false,
+            angle_threshold_deg: 40.0,
         }
     }
 
@@ -61,6 +73,20 @@ impl RmshApp {
             mesh.element_count(),
             file_name
         );
+
+        // Classify topology
+        let topo = rmsh_geo::classify::classify(&mesh, self.angle_threshold_deg);
+        log::info!(
+            "Topology: {} volumes, {} faces, {} edges, {} vertices",
+            topo.volumes.len(),
+            topo.faces.len(),
+            topo.edges.len(),
+            topo.vertices.len(),
+        );
+        self.topology = Some(topo);
+        self.topo_selection = None;
+        self.highlight_dirty = true;
+
         self.mesh = Some(mesh);
         self.mesh_name = Some(file_name.to_string());
         self.scene_initialized = false;
@@ -84,6 +110,7 @@ impl RmshApp {
         let mut renderer = render_state.renderer.write();
         if let Some(scene) = renderer.callback_resources.get_mut::<Scene>() {
             scene.upload_mesh(device, &surface, &wireframe, &points);
+            scene.clear_highlight();
 
             // Fit camera to mesh
             let center = mesh.center();
@@ -94,6 +121,38 @@ impl RmshApp {
             );
         }
         self.scene_initialized = true;
+        self.highlight_dirty = true;
+    }
+
+    fn upload_highlight(&mut self, render_state: &egui_wgpu::RenderState) {
+        if !self.highlight_dirty {
+            return;
+        }
+        self.highlight_dirty = false;
+
+        let device = &render_state.device;
+        let mut renderer = render_state.renderer.write();
+        let Some(scene) = renderer.callback_resources.get_mut::<Scene>() else {
+            return;
+        };
+
+        let Some(mesh) = &self.mesh else {
+            scene.clear_highlight();
+            return;
+        };
+
+        let Some(topo) = &self.topology else {
+            scene.clear_highlight();
+            return;
+        };
+
+        let Some(sel) = &self.topo_selection else {
+            scene.clear_highlight();
+            return;
+        };
+
+        let (surface, wireframe) = rmsh_geo::extract::extract_highlight(mesh, topo, sel);
+        scene.upload_highlight(device, surface.as_ref(), wireframe.as_ref());
     }
 }
 
@@ -116,6 +175,7 @@ impl eframe::App for RmshApp {
         // Upload mesh to GPU if needed
         if let Some(render_state) = self.render_state.clone() {
             self.upload_mesh_to_gpu(&render_state);
+            self.upload_highlight(&render_state);
 
             // Sync config to scene
             let mut renderer = render_state.renderer.write();
@@ -204,6 +264,184 @@ impl eframe::App for RmshApp {
                     ui.label("Drag & drop a .msh file");
                 }
             });
+
+        // Right panel — topology tree
+        let mut reclassify = false;
+        egui::SidePanel::right("topology_panel")
+            .default_width(220.0)
+            .show(ctx, |ui| {
+                ui.heading("Topology");
+                ui.separator();
+
+                if self.topology.is_some() {
+                    // Angle threshold control
+                    let mut threshold = self.angle_threshold_deg;
+                    ui.horizontal(|ui| {
+                        ui.label("Angle °");
+                        if ui
+                            .add(egui::DragValue::new(&mut threshold).range(1.0..=180.0).speed(1.0))
+                            .changed()
+                        {
+                            self.angle_threshold_deg = threshold;
+                            reclassify = true;
+                        }
+                    });
+                    ui.separator();
+
+                    // Clear selection button
+                    if self.topo_selection.is_some() {
+                        if ui.small_button("Clear Selection").clicked() {
+                            self.topo_selection = None;
+                            self.highlight_dirty = true;
+                        }
+                        ui.separator();
+                    }
+                }
+
+                if let Some(ref topo) = self.topology {
+                    // Summary
+                    ui.label(format!(
+                        "V:{} F:{} E:{} P:{}",
+                        topo.volumes.len(),
+                        topo.faces.len(),
+                        topo.edges.len(),
+                        topo.vertices.len(),
+                    ));
+                    ui.separator();
+
+                    // Tree view
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        // Clone data we need so we don't borrow self immutably during the UI
+                        let volumes = topo.volumes.clone();
+                        let faces = topo.faces.clone();
+                        let edges = topo.edges.clone();
+                        let vertices = topo.vertices.clone();
+
+                        let mut new_selection = self.topo_selection;
+
+                        // Volumes
+                        if !volumes.is_empty() {
+                            let vol_id = ui.make_persistent_id("topo_volumes");
+                            egui::collapsing_header::CollapsingState::load_with_default_open(
+                                ui.ctx(),
+                                vol_id,
+                                true,
+                            )
+                            .show_header(ui, |ui| {
+                                ui.label(format!("Volumes ({})", volumes.len()));
+                            })
+                            .body(|ui| {
+                                for vol in &volumes {
+                                    let label = format!("Volume {} ({} elems)", vol.id, vol.element_ids.len());
+                                    let selected = new_selection == Some(TopoSelection::Volume(vol.id));
+                                    if ui.selectable_label(selected, label).clicked() {
+                                        if selected {
+                                            new_selection = None;
+                                        } else {
+                                            new_selection = Some(TopoSelection::Volume(vol.id));
+                                        }
+                                    }
+                                }
+                            });
+                        }
+
+                        // Faces
+                        if !faces.is_empty() {
+                            let face_id = ui.make_persistent_id("topo_faces");
+                            egui::collapsing_header::CollapsingState::load_with_default_open(
+                                ui.ctx(),
+                                face_id,
+                                true,
+                            )
+                            .show_header(ui, |ui| {
+                                ui.label(format!("Faces ({})", faces.len()));
+                            })
+                            .body(|ui| {
+                                for face in &faces {
+                                    let label = format!("Face {} ({} tris)", face.id, face.mesh_faces.len());
+                                    let selected = new_selection == Some(TopoSelection::Face(face.id));
+                                    if ui.selectable_label(selected, label).clicked() {
+                                        if selected {
+                                            new_selection = None;
+                                        } else {
+                                            new_selection = Some(TopoSelection::Face(face.id));
+                                        }
+                                    }
+                                }
+                            });
+                        }
+
+                        // Edges
+                        if !edges.is_empty() {
+                            let edge_id = ui.make_persistent_id("topo_edges");
+                            egui::collapsing_header::CollapsingState::load_with_default_open(
+                                ui.ctx(),
+                                edge_id,
+                                false,
+                            )
+                            .show_header(ui, |ui| {
+                                ui.label(format!("Edges ({})", edges.len()));
+                            })
+                            .body(|ui| {
+                                for edge in &edges {
+                                    let label = format!("Edge {} ({} nodes)", edge.id, edge.node_ids.len());
+                                    let selected = new_selection == Some(TopoSelection::Edge(edge.id));
+                                    if ui.selectable_label(selected, label).clicked() {
+                                        if selected {
+                                            new_selection = None;
+                                        } else {
+                                            new_selection = Some(TopoSelection::Edge(edge.id));
+                                        }
+                                    }
+                                }
+                            });
+                        }
+
+                        // Vertices
+                        if !vertices.is_empty() {
+                            let vert_id = ui.make_persistent_id("topo_vertices");
+                            egui::collapsing_header::CollapsingState::load_with_default_open(
+                                ui.ctx(),
+                                vert_id,
+                                false,
+                            )
+                            .show_header(ui, |ui| {
+                                ui.label(format!("Vertices ({})", vertices.len()));
+                            })
+                            .body(|ui| {
+                                for vert in &vertices {
+                                    let label = format!("Vertex {} (node {})", vert.id, vert.node_id);
+                                    let selected = new_selection == Some(TopoSelection::Vertex(vert.id));
+                                    if ui.selectable_label(selected, label).clicked() {
+                                        if selected {
+                                            new_selection = None;
+                                        } else {
+                                            new_selection = Some(TopoSelection::Vertex(vert.id));
+                                        }
+                                    }
+                                }
+                            });
+                        }
+
+                        if new_selection != self.topo_selection {
+                            self.topo_selection = new_selection;
+                            self.highlight_dirty = true;
+                        }
+                    });
+                } else {
+                    ui.label("No topology");
+                }
+            });
+
+        // Re-classify topology if angle threshold changed
+        if reclassify {
+            if let Some(ref mesh) = self.mesh {
+                let new_topo = rmsh_geo::classify::classify(mesh, self.angle_threshold_deg);
+                self.topology = Some(new_topo);
+                self.topo_selection = None;
+                self.highlight_dirty = true;
+            }
+        }
 
         // Status bar
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
