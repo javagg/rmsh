@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use eframe::egui_wgpu;
 use rmsh_model::{Mesh, Topology, TopoSelection};
 use rmsh_renderer::{RenderConfig, Scene};
@@ -32,6 +34,8 @@ pub struct RmshApp {
     highlight_dirty: bool,
     /// Dihedral angle threshold for topology classification (degrees).
     angle_threshold_deg: f64,
+    /// Recently opened file paths (most recent first, capped at 10).
+    recent_files: Vec<PathBuf>,
 }
 
 impl RmshApp {
@@ -50,6 +54,18 @@ impl RmshApp {
 
         let render_state = cc.wgpu_render_state.clone();
 
+        // Load recent files from persistent storage (newline-separated paths).
+        let recent_files = cc
+            .storage
+            .and_then(|s| s.get_string("recent_files"))
+            .map(|s| {
+                s.lines()
+                    .filter(|l| !l.is_empty())
+                    .map(PathBuf::from)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
         Self {
             mesh: None,
             mesh_name: None,
@@ -62,10 +78,18 @@ impl RmshApp {
             topo_selection: None,
             highlight_dirty: false,
             angle_threshold_deg: 40.0,
+            recent_files,
         }
     }
 
-    fn apply_loaded_mesh(&mut self, file_name: &str, data: &[u8]) -> anyhow::Result<()> {
+    /// Add a path to the front of the recent-files list (dedup, max 10).
+    fn push_recent(&mut self, path: PathBuf) {
+        self.recent_files.retain(|p| p != &path);
+        self.recent_files.insert(0, path);
+        self.recent_files.truncate(10);
+    }
+
+    fn apply_loaded_mesh(&mut self, file_name: &str, data: &[u8], path: Option<PathBuf>) -> anyhow::Result<()> {
         let mesh = rmsh_io::load_msh_from_bytes(data)?;
         self.mesh_info = format!(
             "Nodes: {}  Elements: {}  File: {}",
@@ -90,6 +114,9 @@ impl RmshApp {
         self.mesh = Some(mesh);
         self.mesh_name = Some(file_name.to_string());
         self.scene_initialized = false;
+        if let Some(p) = path {
+            self.push_recent(p);
+        }
         Ok(())
     }
 
@@ -101,8 +128,12 @@ impl RmshApp {
 
         let device = &render_state.device;
 
-        // Extract geometry
-        let surface = rmsh_geo::extract::extract_surface(mesh);
+        // Extract geometry — use topology-colored surface when available
+        let surface = if let Some(ref topo) = self.topology {
+            rmsh_geo::extract::extract_surface_colored(mesh, topo)
+        } else {
+            rmsh_geo::extract::extract_surface(mesh)
+        };
         let wireframe = rmsh_geo::extract::extract_wireframe(mesh, &[1, 2, 3]);
         let points = rmsh_geo::extract::extract_points(mesh);
 
@@ -157,11 +188,21 @@ impl RmshApp {
 }
 
 impl eframe::App for RmshApp {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        let value = self
+            .recent_files
+            .iter()
+            .map(|p| p.to_string_lossy().replace('\n', ""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        storage.set_string("recent_files", value);
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         for event in drain_io_events(&self.io_queue) {
             match event {
-                IoEvent::MeshLoaded { file_name, data } => {
-                    match self.apply_loaded_mesh(&file_name, &data) {
+                IoEvent::MeshLoaded { file_name, data, path } => {
+                    match self.apply_loaded_mesh(&file_name, &data, path) {
                         Ok(()) => log::info!("Loaded mesh: {}", file_name),
                         Err(e) => log::error!("Failed to load mesh: {}", e),
                     }
@@ -201,6 +242,37 @@ impl eframe::App for RmshApp {
                         request_open_dialog(self.io_queue.clone(), ctx.clone());
                         ui.close_menu();
                     }
+                    // Open Recent submenu
+                    let recent_files_snapshot = self.recent_files.clone();
+                    ui.menu_button("Open Recent...", |ui| {
+                        if recent_files_snapshot.is_empty() {
+                            ui.add_enabled(false, egui::Label::new("(No recent files)"));
+                        } else {
+                            for path in &recent_files_snapshot {
+                                let label = path
+                                    .file_name()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
+                                    .to_string();
+                                let response = ui
+                                    .add(egui::Button::new(&label))
+                                    .on_hover_text(path.to_string_lossy().as_ref());
+                                if response.clicked() {
+                                    request_open_path(
+                                        path.clone(),
+                                        self.io_queue.clone(),
+                                        ctx.clone(),
+                                    );
+                                    ui.close_menu();
+                                }
+                            }
+                            ui.separator();
+                            if ui.button("Clear Recent Files").clicked() {
+                                self.recent_files.clear();
+                                ui.close_menu();
+                            }
+                        }
+                    });
                     if ui
                         .add_enabled(self.mesh.is_some(), egui::Button::new("Save As MSH 4.1..."))
                         .clicked()

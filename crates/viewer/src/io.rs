@@ -8,7 +8,7 @@ pub type IoQueue = Arc<Mutex<VecDeque<IoEvent>>>;
 
 #[derive(Debug)]
 pub enum IoEvent {
-    MeshLoaded { file_name: String, data: Vec<u8> },
+    MeshLoaded { file_name: String, data: Vec<u8>, path: Option<PathBuf> },
     Error(String),
 }
 
@@ -40,8 +40,12 @@ pub fn request_open_dialog(queue: IoQueue, ctx: egui::Context) {
 
         if let Some(file) = file {
             let file_name = file.file_name();
+            #[cfg(not(target_arch = "wasm32"))]
+            let path: Option<PathBuf> = Some(file.path().to_path_buf());
+            #[cfg(target_arch = "wasm32")]
+            let path: Option<PathBuf> = None;
             let data = file.read().await;
-            push_event(&queue, IoEvent::MeshLoaded { file_name, data });
+            push_event(&queue, IoEvent::MeshLoaded { file_name, data, path });
             ctx.request_repaint();
         }
     });
@@ -56,7 +60,7 @@ pub fn request_open_path(path: PathBuf, queue: IoQueue, ctx: egui::Context) {
                     .unwrap_or_default()
                     .to_string_lossy()
                     .to_string();
-                IoEvent::MeshLoaded { file_name, data }
+                IoEvent::MeshLoaded { file_name, data, path: Some(path.clone()) }
             })
             .unwrap_or_else(|error| IoEvent::Error(format!("Failed to load mesh: {}", error)));
         push_event(&queue, result);

@@ -36,12 +36,13 @@ impl MeshSurfaceGpu {
             return None;
         }
 
-        // Interleave position + normal into [f32; 6] per vertex
-        let mut vertices: Vec<[f32; 6]> = Vec::with_capacity(data.positions.len());
+        // Interleave position + normal + color into [f32; 9] per vertex
+        let mut vertices: Vec<[f32; 9]> = Vec::with_capacity(data.positions.len());
         for i in 0..data.positions.len() {
             let p = data.positions[i];
             let n = data.normals[i];
-            vertices.push([p[0], p[1], p[2], n[0], n[1], n[2]]);
+            let c = data.colors[i];
+            vertices.push([p[0], p[1], p[2], n[0], n[1], n[2], c[0], c[1], c[2]]);
         }
 
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {

@@ -24,9 +24,9 @@ pub fn create_mesh_pipeline(
             module: &shader,
             entry_point: Some("vs_main"),
             buffers: &[VertexBufferLayout {
-                array_stride: std::mem::size_of::<[f32; 6]>() as BufferAddress,
+                array_stride: std::mem::size_of::<[f32; 9]>() as BufferAddress,
                 step_mode: VertexStepMode::Vertex,
-                attributes: &vertex_attr_array![0 => Float32x3, 1 => Float32x3],
+                attributes: &vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3],
             }],
             compilation_options: Default::default(),
         },
@@ -246,9 +246,9 @@ pub fn create_highlight_surface_pipeline(
             module: &shader,
             entry_point: Some("vs_main"),
             buffers: &[VertexBufferLayout {
-                array_stride: std::mem::size_of::<[f32; 6]>() as BufferAddress,
+                array_stride: std::mem::size_of::<[f32; 9]>() as BufferAddress,
                 step_mode: VertexStepMode::Vertex,
-                attributes: &vertex_attr_array![0 => Float32x3, 1 => Float32x3],
+                attributes: &vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3],
             }],
             compilation_options: Default::default(),
         },
