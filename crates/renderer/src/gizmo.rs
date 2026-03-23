@@ -18,18 +18,63 @@ struct GizmoVertex {
 impl AxisGizmo {
     pub fn new(device: &wgpu::Device) -> Self {
         let axis_length = 1.0f32;
-        // X axis (red), Y axis (green), Z axis (blue)
-        let vertices = vec![
-            // X axis
-            GizmoVertex { position: [0.0, 0.0, 0.0], color: [1.0, 0.0, 0.0] },
-            GizmoVertex { position: [axis_length, 0.0, 0.0], color: [1.0, 0.0, 0.0] },
-            // Y axis
-            GizmoVertex { position: [0.0, 0.0, 0.0], color: [0.0, 1.0, 0.0] },
-            GizmoVertex { position: [0.0, axis_length, 0.0], color: [0.0, 1.0, 0.0] },
-            // Z axis
-            GizmoVertex { position: [0.0, 0.0, 0.0], color: [0.3, 0.3, 1.0] },
-            GizmoVertex { position: [0.0, 0.0, axis_length], color: [0.3, 0.3, 1.0] },
-        ];
+        let letter_gap = 0.08f32;
+        let letter_size = 0.16f32;
+
+        fn push_segment(
+            vertices: &mut Vec<GizmoVertex>,
+            a: [f32; 3],
+            b: [f32; 3],
+            color: [f32; 3],
+        ) {
+            vertices.push(GizmoVertex { position: a, color });
+            vertices.push(GizmoVertex { position: b, color });
+        }
+
+        // X axis (red), Y axis (green), Z axis (bright blue)
+        let x_color = [1.0, 0.15, 0.15];
+        let y_color = [0.2, 1.0, 0.2];
+        let z_color = [0.2, 0.65, 1.0];
+
+        let mut vertices = Vec::new();
+
+        // Axes
+        push_segment(&mut vertices, [0.0, 0.0, 0.0], [axis_length, 0.0, 0.0], x_color);
+        push_segment(&mut vertices, [0.0, 0.0, 0.0], [0.0, axis_length, 0.0], y_color);
+        push_segment(&mut vertices, [0.0, 0.0, 0.0], [0.0, 0.0, axis_length], z_color);
+
+        // X glyph near +X endpoint (drawn in YZ plane)
+        let x0 = axis_length + letter_gap;
+        let hs = letter_size * 0.5;
+        push_segment(&mut vertices, [x0, -hs, -hs], [x0, hs, hs], x_color);
+        push_segment(&mut vertices, [x0, -hs, hs], [x0, hs, -hs], x_color);
+
+        // Y glyph near +Y endpoint (drawn in XY plane)
+        let y0 = axis_length + letter_gap;
+        push_segment(
+            &mut vertices,
+            [-hs, y0 + hs * 0.6, 0.0],
+            [0.0, y0, 0.0],
+            y_color,
+        );
+        push_segment(
+            &mut vertices,
+            [hs, y0 + hs * 0.6, 0.0],
+            [0.0, y0, 0.0],
+            y_color,
+        );
+        push_segment(
+            &mut vertices,
+            [0.0, y0, 0.0],
+            [0.0, y0 - hs, 0.0],
+            y_color,
+        );
+
+        // Z glyph near +Z endpoint (drawn in XY plane)
+        let z0 = axis_length + letter_gap;
+        push_segment(&mut vertices, [-hs, hs, z0], [hs, hs, z0], z_color);
+        push_segment(&mut vertices, [hs, hs, z0], [-hs, -hs, z0], z_color);
+        push_segment(&mut vertices, [-hs, -hs, z0], [hs, -hs, z0], z_color);
 
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("gizmo_vertex_buffer"),

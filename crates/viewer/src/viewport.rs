@@ -100,11 +100,11 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
             }
         }
 
-        // Render gizmo in bottom-left corner
+        // Render gizmo in bottom-right corner
         if scene.config.show_gizmo {
-            let gizmo_size = 80u32;
+            let gizmo_size = 96u32;
             let margin = 10u32;
-            let gizmo_x = viewport.left_px as f32 + margin as f32;
+            let gizmo_x = viewport.left_px as f32 + width as f32 - gizmo_size as f32 - margin as f32;
             let gizmo_y = viewport.top_px as f32 + height as f32 - gizmo_size as f32 - margin as f32;
             render_pass.set_viewport(gizmo_x, gizmo_y, gizmo_size as f32, gizmo_size as f32, 0.0, 1.0);
             render_pass.set_pipeline(scene.gizmo_pipeline());
