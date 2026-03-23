@@ -241,6 +241,66 @@ impl RmshApp {
         });
     }
 
+    fn start_3d_meshing(&mut self, ctx: &egui::Context) {
+        if self.meshing_in_progress {
+            return;
+        }
+
+        let Some(mesh) = self.mesh.clone() else {
+            return;
+        };
+
+        let queue = self.io_queue.clone();
+        let egui_ctx = ctx.clone();
+
+        self.meshing_in_progress = true;
+        self.meshing_progress = 0.0;
+        self.meshing_message = "Preparing 3D meshing".to_string();
+
+        thread::spawn(move || {
+            enqueue_event(
+                &queue,
+                IoEvent::MeshingStarted {
+                    message: "Start 3D tetrahedralization".to_string(),
+                },
+            );
+            egui_ctx.request_repaint();
+
+            enqueue_event(
+                &queue,
+                IoEvent::MeshingProgress {
+                    progress: 0.35,
+                    message: "Building boundary and tetrahedra".to_string(),
+                },
+            );
+            egui_ctx.request_repaint();
+
+            match rmsh_algo::tetrahedralize_closed_surface(&mesh) {
+                Ok(generated) => {
+                    enqueue_event(
+                        &queue,
+                        IoEvent::MeshingProgress {
+                            progress: 0.9,
+                            message: "Finalizing generated 3D mesh".to_string(),
+                        },
+                    );
+                    enqueue_event(
+                        &queue,
+                        IoEvent::MeshGenerated {
+                            mesh: generated,
+                            mesh_name: "meshed_volume_3d.msh".to_string(),
+                        },
+                    );
+                }
+                Err(err) => {
+                    enqueue_event(&queue, IoEvent::Error(err.to_string()));
+                }
+            }
+
+            egui_ctx.request_repaint();
+        });
+    }
+
     fn upload_mesh_to_gpu(&mut self, render_state: &egui_wgpu::RenderState) {
         if self.scene_initialized {
             return;
@@ -332,7 +392,7 @@ impl eframe::App for RmshApp {
                     self.apply_generated_mesh(mesh, mesh_name.clone());
                     self.meshing_in_progress = false;
                     self.meshing_progress = 1.0;
-                    self.meshing_message = format!("2D meshing finished: {}", mesh_name);
+                    self.meshing_message = format!("Meshing finished: {}", mesh_name);
                     log::info!("{}", self.meshing_message);
                 }
                 IoEvent::MeshingStarted { message } => {
@@ -466,6 +526,32 @@ impl eframe::App for RmshApp {
                             .clicked()
                         {
                             self.start_2d_meshing(ctx);
+                            ui.close_menu();
+                        }
+
+                        if self.meshing_in_progress {
+                            ui.separator();
+                            ui.add(
+                                egui::ProgressBar::new(self.meshing_progress)
+                                    .show_percentage()
+                                    .text(&self.meshing_message),
+                            );
+                        }
+                    });
+
+                    ui.menu_button("3D Meshing", |ui| {
+                        ui.small("Generate tetrahedral volume mesh from closed surface.");
+
+                        let can_start = self.source_is_step && !self.meshing_in_progress;
+                        if !self.source_is_step {
+                            ui.small("Load a STEP model to enable 3D meshing.");
+                        }
+
+                        if ui
+                            .add_enabled(can_start, egui::Button::new("Tetrahedralize Model"))
+                            .clicked()
+                        {
+                            self.start_3d_meshing(ctx);
                             ui.close_menu();
                         }
 
