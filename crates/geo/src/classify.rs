@@ -32,12 +32,8 @@ pub fn classify(mesh: &Mesh, angle_threshold_deg: f64) -> Topology {
 
     // Step 1: Collect boundary faces
     let faces = collect_boundary_faces(mesh);
-    if faces.is_empty() {
-        return Topology {
-            angle_threshold_deg,
-            ..Default::default()
-        };
-    }
+    // Do not early-return on empty faces: pure 1D/0D meshes should still
+    // produce topo edges/vertices via explicit element dimensions.
 
     // Step 2: Build edge → face adjacency
     // An "edge" is a pair of node IDs (sorted).
@@ -140,6 +136,33 @@ pub fn classify(mesh: &Mesh, angle_threshold_deg: f64) -> Topology {
         }
     }
 
+    // Also include explicit 1D elements as topo-edges when they are not already
+    // represented by classified face boundaries.
+    for elem in mesh.elements_by_dimension(1) {
+        if elem.node_ids.len() < 2 {
+            continue;
+        }
+        let start = elem.node_ids[0];
+        let end = *elem.node_ids.last().unwrap_or(&start);
+        let key = if start < end {
+            (start, end)
+        } else {
+            (end, start)
+        };
+
+        if topo_edge_map.contains_key(&key) {
+            continue;
+        }
+
+        let eid = topo_edges.len();
+        topo_edge_map.insert(key, eid);
+        topo_edges.push(TopoEdge {
+            id: eid,
+            vertex_ids: [None, None],
+            node_ids: elem.node_ids.clone(),
+        });
+    }
+
     // Step 6: Chain topo-edges and identify TopoVertices.
     // A TopoVertex is a node where 3+ topo edges meet (or 1 for dangling, 2 for corners).
     let mut node_to_edges: HashMap<u64, Vec<usize>> = HashMap::new();
@@ -169,8 +192,74 @@ pub fn classify(mesh: &Mesh, angle_threshold_deg: f64) -> Topology {
         te.vertex_ids[1] = node_to_vertex.get(&n1).copied();
     }
 
+    // Include explicit 0D elements as topo-vertices.
+    for elem in mesh.elements_by_dimension(0) {
+        let Some(&nid) = elem.node_ids.first() else {
+            continue;
+        };
+        if node_to_vertex.contains_key(&nid) {
+            continue;
+        }
+        let vid = topo_vertices.len();
+        topo_vertices.push(TopoVertex { id: vid, node_id: nid });
+        node_to_vertex.insert(nid, vid);
+    }
+
     // Step 7: Group volume elements into TopoVolumes by connectivity
-    let topo_volumes = classify_volumes(mesh);
+    let mut topo_volumes = classify_volumes(mesh);
+
+    // Fill TopoVolume -> TopoFace ownership by mapping each volume boundary face
+    // to the classified TopoFace id.
+    let mut face_key_to_topo_face: HashMap<Vec<u64>, usize> = HashMap::new();
+    for (fi, face) in faces.iter().enumerate() {
+        if let Some(tid) = face_to_topo[fi] {
+            let mut key = face.nodes.clone();
+            key.sort_unstable();
+            face_key_to_topo_face.insert(key, tid);
+        }
+    }
+
+    let elem_by_id: HashMap<u64, _> = mesh.elements.iter().map(|e| (e.id, e)).collect();
+    for vol in &mut topo_volumes {
+        let mut face_count: HashMap<Vec<u64>, usize> = HashMap::new();
+
+        for eid in &vol.element_ids {
+            let Some(elem) = elem_by_id.get(eid) else {
+                continue;
+            };
+            for face_local in elem.etype.faces() {
+                let mut face_nodes: Vec<u64> = Vec::with_capacity(face_local.len());
+                let mut valid = true;
+                for &li in *face_local {
+                    if let Some(&nid) = elem.node_ids.get(li) {
+                        face_nodes.push(nid);
+                    } else {
+                        valid = false;
+                        break;
+                    }
+                }
+                if !valid || face_nodes.len() < 3 {
+                    continue;
+                }
+                face_nodes.sort_unstable();
+                *face_count.entry(face_nodes).or_insert(0) += 1;
+            }
+        }
+
+        let mut face_ids: HashSet<usize> = HashSet::new();
+        for (face_key, count) in face_count {
+            // Boundary within this TopoVolume
+            if count == 1 {
+                if let Some(fid) = face_key_to_topo_face.get(&face_key) {
+                    face_ids.insert(*fid);
+                }
+            }
+        }
+
+        let mut sorted: Vec<usize> = face_ids.into_iter().collect();
+        sorted.sort_unstable();
+        vol.face_ids = sorted;
+    }
 
     Topology {
         vertices: topo_vertices,
@@ -189,6 +278,7 @@ fn collect_boundary_faces(mesh: &Mesh) -> Vec<MeshFace> {
     let surf_elements = mesh.elements_by_dimension(2);
 
     let mut faces = Vec::new();
+    let mut inserted_keys: HashSet<Vec<u64>> = HashSet::new();
 
     if !vol_elements.is_empty() {
         // Count face occurrences — boundary faces appear once
@@ -198,9 +288,21 @@ fn collect_boundary_faces(mesh: &Mesh) -> Vec<MeshFace> {
         for elem in &vol_elements {
             let elem_faces = elem.etype.faces();
             for face_local in elem_faces {
-                let face_nodes: Vec<u64> = face_local.iter().map(|&i| elem.node_ids[i]).collect();
+                let mut face_nodes: Vec<u64> = Vec::with_capacity(face_local.len());
+                let mut valid = true;
+                for &i in *face_local {
+                    if let Some(&nid) = elem.node_ids.get(i) {
+                        face_nodes.push(nid);
+                    } else {
+                        valid = false;
+                        break;
+                    }
+                }
+                if !valid || face_nodes.len() < 3 {
+                    continue;
+                }
                 let mut sorted = face_nodes.clone();
-                sorted.sort();
+                sorted.sort_unstable();
                 *face_seen.entry(sorted.clone()).or_insert(0) += 1;
                 face_count.entry(sorted).or_insert(face_nodes);
             }
@@ -208,6 +310,9 @@ fn collect_boundary_faces(mesh: &Mesh) -> Vec<MeshFace> {
 
         for (sorted, count) in &face_seen {
             if *count == 1 {
+                if !inserted_keys.insert(sorted.clone()) {
+                    continue;
+                }
                 let nodes = face_count[sorted].clone();
                 let normal = compute_face_normal(&nodes, mesh);
                 faces.push(MeshFace {
@@ -216,13 +321,22 @@ fn collect_boundary_faces(mesh: &Mesh) -> Vec<MeshFace> {
                 });
             }
         }
-    } else {
-        // Pure surface mesh — use 2D elements directly
-        for elem in &surf_elements {
-            let nodes = elem.node_ids.clone();
-            let normal = compute_face_normal(&nodes, mesh);
-            faces.push(MeshFace { nodes, normal });
+    }
+
+    // Always include explicit 2D elements; they may exist with or without 3D elements.
+    for elem in &surf_elements {
+        if elem.node_ids.len() < 3 {
+            continue;
         }
+        let mut sorted = elem.node_ids.clone();
+        sorted.sort_unstable();
+        if !inserted_keys.insert(sorted) {
+            continue;
+        }
+
+        let nodes = elem.node_ids.clone();
+        let normal = compute_face_normal(&nodes, mesh);
+        faces.push(MeshFace { nodes, normal });
     }
 
     faces
@@ -273,11 +387,41 @@ fn classify_volumes(mesh: &Mesh) -> Vec<TopoVolume> {
         return Vec::new();
     }
 
-    // Build node → element index mapping for adjacency
-    let mut node_to_elems: HashMap<u64, Vec<usize>> = HashMap::new();
+    // Build face → element index mapping for adjacency.
+    // Two volume elements are adjacent only if they share an entire face.
+    let mut face_to_elems: HashMap<Vec<u64>, Vec<usize>> = HashMap::new();
     for (i, elem) in vol_elements.iter().enumerate() {
-        for &nid in &elem.node_ids {
-            node_to_elems.entry(nid).or_default().push(i);
+        for face_local in elem.etype.faces() {
+            let mut face_nodes: Vec<u64> = Vec::with_capacity(face_local.len());
+            let mut valid = true;
+            for &li in *face_local {
+                if let Some(&nid) = elem.node_ids.get(li) {
+                    face_nodes.push(nid);
+                } else {
+                    valid = false;
+                    break;
+                }
+            }
+            if !valid || face_nodes.len() < 3 {
+                continue;
+            }
+            face_nodes.sort_unstable();
+            face_to_elems.entry(face_nodes).or_default().push(i);
+        }
+    }
+
+    let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); vol_elements.len()];
+    for owners in face_to_elems.values() {
+        if owners.len() < 2 {
+            continue;
+        }
+        for i in 0..owners.len() {
+            for j in (i + 1)..owners.len() {
+                let a = owners[i];
+                let b = owners[j];
+                adjacency[a].push(b);
+                adjacency[b].push(a);
+            }
         }
     }
 
@@ -299,13 +443,11 @@ fn classify_volumes(mesh: &Mesh) -> Vec<TopoVolume> {
         while let Some(ei) = queue.pop_front() {
             element_ids.push(vol_elements[ei].id);
 
-            // Find neighbors via shared nodes
-            for &nid in &vol_elements[ei].node_ids {
-                for &ni in &node_to_elems[&nid] {
-                    if !visited[ni] {
-                        visited[ni] = true;
-                        queue.push_back(ni);
-                    }
+            // Find neighbors via shared full faces.
+            for &ni in &adjacency[ei] {
+                if !visited[ni] {
+                    visited[ni] = true;
+                    queue.push_back(ni);
                 }
             }
         }
@@ -318,4 +460,89 @@ fn classify_volumes(mesh: &Mesh) -> Vec<TopoVolume> {
     }
 
     volumes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::classify;
+    use rmsh_model::{Element, ElementType, Mesh, Node};
+
+    fn add_nodes(mesh: &mut Mesh, nodes: &[(u64, f64, f64, f64)]) {
+        for &(id, x, y, z) in nodes {
+            mesh.add_node(Node::new(id, x, y, z));
+        }
+    }
+
+    #[test]
+    fn volumes_connected_by_full_face_form_one_topovolume() {
+        let mut mesh = Mesh::new();
+        add_nodes(
+            &mut mesh,
+            &[
+                (1, 0.0, 0.0, 0.0),
+                (2, 1.0, 0.0, 0.0),
+                (3, 0.0, 1.0, 0.0),
+                (4, 0.0, 0.0, 1.0),
+                (5, 0.0, 0.0, -1.0),
+            ],
+        );
+
+        mesh.add_element(Element::new(1, ElementType::Tetrahedron4, vec![1, 2, 3, 4]));
+        mesh.add_element(Element::new(2, ElementType::Tetrahedron4, vec![1, 2, 3, 5]));
+
+        let topo = classify(&mesh, 40.0);
+        assert_eq!(topo.volumes.len(), 1);
+        assert_eq!(topo.volumes[0].element_ids.len(), 2);
+        assert!(!topo.volumes[0].face_ids.is_empty());
+        for fid in &topo.volumes[0].face_ids {
+            assert!(*fid < topo.faces.len());
+        }
+    }
+
+    #[test]
+    fn volumes_touching_at_single_node_stay_separate() {
+        let mut mesh = Mesh::new();
+        add_nodes(
+            &mut mesh,
+            &[
+                (1, 0.0, 0.0, 0.0),
+                (2, 1.0, 0.0, 0.0),
+                (3, 0.0, 1.0, 0.0),
+                (4, 0.0, 0.0, 1.0),
+                (5, -1.0, 0.0, 0.0),
+                (6, 0.0, -1.0, 0.0),
+                (7, 0.0, 0.0, -1.0),
+            ],
+        );
+
+        mesh.add_element(Element::new(1, ElementType::Tetrahedron4, vec![1, 2, 3, 4]));
+        mesh.add_element(Element::new(2, ElementType::Tetrahedron4, vec![1, 5, 6, 7]));
+
+        let topo = classify(&mesh, 40.0);
+        assert_eq!(topo.volumes.len(), 2);
+    }
+
+    #[test]
+    fn pure_line_and_point_mesh_generates_edges_and_vertices() {
+        let mut mesh = Mesh::new();
+        add_nodes(
+            &mut mesh,
+            &[
+                (1, 0.0, 0.0, 0.0),
+                (2, 1.0, 0.0, 0.0),
+                (3, 2.0, 0.0, 0.0),
+                (4, 3.0, 0.0, 0.0),
+            ],
+        );
+
+        mesh.add_element(Element::new(1, ElementType::Line2, vec![1, 2]));
+        mesh.add_element(Element::new(2, ElementType::Line2, vec![2, 3]));
+        mesh.add_element(Element::new(3, ElementType::Point1, vec![4]));
+
+        let topo = classify(&mesh, 40.0);
+        assert_eq!(topo.faces.len(), 0);
+        assert_eq!(topo.volumes.len(), 0);
+        assert_eq!(topo.edges.len(), 2);
+        assert!(topo.vertices.iter().any(|v| v.node_id == 4));
+    }
 }

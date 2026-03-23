@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use eframe::egui_wgpu;
@@ -409,115 +410,308 @@ impl eframe::App for RmshApp {
                     ));
                     ui.separator();
 
-                    // Tree view
+                    // Tree view (Volume -> Face -> Edge -> Vertex)
                     egui::ScrollArea::vertical().show(ui, |ui| {
-                        // Clone data we need so we don't borrow self immutably during the UI
+                        // Clone data we need so we don't borrow self immutably during UI interaction.
                         let volumes = topo.volumes.clone();
                         let faces = topo.faces.clone();
                         let edges = topo.edges.clone();
                         let vertices = topo.vertices.clone();
 
+                        let face_map: HashMap<usize, _> =
+                            faces.iter().cloned().map(|f| (f.id, f)).collect();
+                        let edge_map: HashMap<usize, _> =
+                            edges.iter().cloned().map(|e| (e.id, e)).collect();
+                        let vertex_map: HashMap<usize, _> =
+                            vertices.iter().cloned().map(|v| (v.id, v)).collect();
+                        let node_to_vertex: HashMap<u64, usize> =
+                            vertices.iter().map(|v| (v.node_id, v.id)).collect();
+
                         let mut new_selection = self.topo_selection;
 
-                        // Volumes
+                        let mut used_faces: HashSet<usize> = HashSet::new();
+                        let mut used_edges: HashSet<usize> = HashSet::new();
+                        let mut used_vertices: HashSet<usize> = HashSet::new();
+
                         if !volumes.is_empty() {
-                            let vol_id = ui.make_persistent_id("topo_volumes");
-                            egui::collapsing_header::CollapsingState::load_with_default_open(
-                                ui.ctx(),
-                                vol_id,
-                                true,
-                            )
-                            .show_header(ui, |ui| {
-                                ui.label(format!("Volumes ({})", volumes.len()));
-                            })
-                            .body(|ui| {
-                                for vol in &volumes {
-                                    let label = format!("Volume {} ({} elems)", vol.id, vol.element_ids.len());
-                                    let selected = new_selection == Some(TopoSelection::Volume(vol.id));
-                                    if ui.selectable_label(selected, label).clicked() {
-                                        if selected {
-                                            new_selection = None;
-                                        } else {
-                                            new_selection = Some(TopoSelection::Volume(vol.id));
+                            egui::CollapsingHeader::new(format!("Volumes ({})", volumes.len()))
+                                .id_salt("topo_volumes_tree")
+                                .default_open(true)
+                                .show(ui, |ui| {
+                                    for vol in &volumes {
+                                        let header = egui::CollapsingHeader::new(format!(
+                                            "Volume {} ({} elems, {} faces)",
+                                            vol.id,
+                                            vol.element_ids.len(),
+                                            vol.face_ids.len()
+                                        ))
+                                        .id_salt(("vol", vol.id))
+                                        .default_open(false)
+                                        .show(ui, |ui| {
+                                            for fid in &vol.face_ids {
+                                                used_faces.insert(*fid);
+                                                let Some(face) = face_map.get(fid) else {
+                                                    continue;
+                                                };
+
+                                                let face_header = egui::CollapsingHeader::new(format!(
+                                                    "Face {} ({} mesh faces, {} edges)",
+                                                    face.id,
+                                                    face.mesh_faces.len(),
+                                                    face.edge_ids.len()
+                                                ))
+                                                .id_salt(("face", vol.id, face.id))
+                                                .default_open(false)
+                                                .show(ui, |ui| {
+                                                    for eid in &face.edge_ids {
+                                                        used_edges.insert(*eid);
+                                                        let Some(edge) = edge_map.get(eid) else {
+                                                            continue;
+                                                        };
+
+                                                        let mut vids: Vec<usize> = edge
+                                                            .vertex_ids
+                                                            .iter()
+                                                            .filter_map(|v| *v)
+                                                            .collect();
+                                                        if vids.is_empty() {
+                                                            if let Some(first) = edge.node_ids.first() {
+                                                                if let Some(vid) = node_to_vertex.get(first) {
+                                                                    vids.push(*vid);
+                                                                }
+                                                            }
+                                                            if let Some(last) = edge.node_ids.last() {
+                                                                if let Some(vid) = node_to_vertex.get(last) {
+                                                                    if !vids.contains(vid) {
+                                                                        vids.push(*vid);
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        for vid in &vids {
+                                                            used_vertices.insert(*vid);
+                                                        }
+
+                                                        let edge_header = egui::CollapsingHeader::new(format!(
+                                                            "Edge {} ({} nodes, {} vertices)",
+                                                            edge.id,
+                                                            edge.node_ids.len(),
+                                                            vids.len()
+                                                        ))
+                                                        .id_salt(("edge", vol.id, face.id, edge.id))
+                                                        .default_open(false)
+                                                        .show(ui, |ui| {
+                                                            for vid in vids {
+                                                                if let Some(vertex) = vertex_map.get(&vid) {
+                                                                    let selected = new_selection
+                                                                        == Some(TopoSelection::Vertex(vertex.id));
+                                                                    if ui
+                                                                        .selectable_label(
+                                                                            selected,
+                                                                            format!(
+                                                                                "Vertex {} (node {})",
+                                                                                vertex.id, vertex.node_id
+                                                                            ),
+                                                                        )
+                                                                        .clicked()
+                                                                    {
+                                                                        toggle_topo_selection(
+                                                                            &mut new_selection,
+                                                                            TopoSelection::Vertex(vertex.id),
+                                                                        );
+                                                                    }
+                                                                }
+                                                            }
+                                                        });
+
+                                                        if edge_header.header_response.clicked() {
+                                                            toggle_topo_selection(
+                                                                &mut new_selection,
+                                                                TopoSelection::Edge(edge.id),
+                                                            );
+                                                        }
+                                                    }
+                                                });
+
+                                                if face_header.header_response.clicked() {
+                                                    toggle_topo_selection(
+                                                        &mut new_selection,
+                                                        TopoSelection::Face(face.id),
+                                                    );
+                                                }
+                                            }
+                                        });
+
+                                        if header.header_response.clicked() {
+                                            toggle_topo_selection(
+                                                &mut new_selection,
+                                                TopoSelection::Volume(vol.id),
+                                            );
                                         }
                                     }
-                                }
-                            });
+                                });
                         }
 
-                        // Faces
-                        if !faces.is_empty() {
-                            let face_id = ui.make_persistent_id("topo_faces");
-                            egui::collapsing_header::CollapsingState::load_with_default_open(
-                                ui.ctx(),
-                                face_id,
-                                true,
-                            )
-                            .show_header(ui, |ui| {
-                                ui.label(format!("Faces ({})", faces.len()));
-                            })
-                            .body(|ui| {
-                                for face in &faces {
-                                    let label = format!("Face {} ({} tris)", face.id, face.mesh_faces.len());
-                                    let selected = new_selection == Some(TopoSelection::Face(face.id));
-                                    if ui.selectable_label(selected, label).clicked() {
-                                        if selected {
-                                            new_selection = None;
-                                        } else {
-                                            new_selection = Some(TopoSelection::Face(face.id));
+                        // Orphan faces not referenced by any volume (e.g. pure surface meshes).
+                        let orphan_faces: Vec<_> = faces
+                            .iter()
+                            .filter(|f| !used_faces.contains(&f.id))
+                            .cloned()
+                            .collect();
+                        if !orphan_faces.is_empty() {
+                            egui::CollapsingHeader::new(format!("Faces ({})", orphan_faces.len()))
+                                .id_salt("topo_orphan_faces")
+                                .default_open(volumes.is_empty())
+                                .show(ui, |ui| {
+                                    for face in &orphan_faces {
+                                        let face_header = egui::CollapsingHeader::new(format!(
+                                            "Face {} ({} mesh faces, {} edges)",
+                                            face.id,
+                                            face.mesh_faces.len(),
+                                            face.edge_ids.len()
+                                        ))
+                                        .id_salt(("orphan_face", face.id))
+                                        .default_open(false)
+                                        .show(ui, |ui| {
+                                            for eid in &face.edge_ids {
+                                                used_edges.insert(*eid);
+                                                let Some(edge) = edge_map.get(eid) else {
+                                                    continue;
+                                                };
+                                                let selected =
+                                                    new_selection == Some(TopoSelection::Edge(edge.id));
+                                                if ui
+                                                    .selectable_label(
+                                                        selected,
+                                                        format!(
+                                                            "Edge {} ({} nodes)",
+                                                            edge.id,
+                                                            edge.node_ids.len()
+                                                        ),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    toggle_topo_selection(
+                                                        &mut new_selection,
+                                                        TopoSelection::Edge(edge.id),
+                                                    );
+                                                }
+                                            }
+                                        });
+                                        if face_header.header_response.clicked() {
+                                            toggle_topo_selection(
+                                                &mut new_selection,
+                                                TopoSelection::Face(face.id),
+                                            );
                                         }
                                     }
-                                }
-                            });
+                                });
                         }
 
-                        // Edges
-                        if !edges.is_empty() {
-                            let edge_id = ui.make_persistent_id("topo_edges");
-                            egui::collapsing_header::CollapsingState::load_with_default_open(
-                                ui.ctx(),
-                                edge_id,
-                                false,
-                            )
-                            .show_header(ui, |ui| {
-                                ui.label(format!("Edges ({})", edges.len()));
-                            })
-                            .body(|ui| {
-                                for edge in &edges {
-                                    let label = format!("Edge {} ({} nodes)", edge.id, edge.node_ids.len());
-                                    let selected = new_selection == Some(TopoSelection::Edge(edge.id));
-                                    if ui.selectable_label(selected, label).clicked() {
-                                        if selected {
-                                            new_selection = None;
-                                        } else {
-                                            new_selection = Some(TopoSelection::Edge(edge.id));
+                        // Orphan edges not referenced by any face.
+                        let orphan_edges: Vec<_> = edges
+                            .iter()
+                            .filter(|e| !used_edges.contains(&e.id))
+                            .cloned()
+                            .collect();
+                        if !orphan_edges.is_empty() {
+                            egui::CollapsingHeader::new(format!("Edges ({})", orphan_edges.len()))
+                                .id_salt("topo_orphan_edges")
+                                .default_open(!orphan_faces.is_empty())
+                                .show(ui, |ui| {
+                                    for edge in &orphan_edges {
+                                        let mut vids: Vec<usize> =
+                                            edge.vertex_ids.iter().filter_map(|v| *v).collect();
+                                        if vids.is_empty() {
+                                            if let Some(first) = edge.node_ids.first() {
+                                                if let Some(vid) = node_to_vertex.get(first) {
+                                                    vids.push(*vid);
+                                                }
+                                            }
+                                            if let Some(last) = edge.node_ids.last() {
+                                                if let Some(vid) = node_to_vertex.get(last) {
+                                                    if !vids.contains(vid) {
+                                                        vids.push(*vid);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        for vid in &vids {
+                                            used_vertices.insert(*vid);
+                                        }
+
+                                        let edge_header = egui::CollapsingHeader::new(format!(
+                                            "Edge {} ({} nodes, {} vertices)",
+                                            edge.id,
+                                            edge.node_ids.len(),
+                                            vids.len()
+                                        ))
+                                        .id_salt(("orphan_edge", edge.id))
+                                        .default_open(false)
+                                        .show(ui, |ui| {
+                                            for vid in vids {
+                                                if let Some(vertex) = vertex_map.get(&vid) {
+                                                    let selected = new_selection
+                                                        == Some(TopoSelection::Vertex(vertex.id));
+                                                    if ui
+                                                        .selectable_label(
+                                                            selected,
+                                                            format!(
+                                                                "Vertex {} (node {})",
+                                                                vertex.id, vertex.node_id
+                                                            ),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        toggle_topo_selection(
+                                                            &mut new_selection,
+                                                            TopoSelection::Vertex(vertex.id),
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        });
+                                        if edge_header.header_response.clicked() {
+                                            toggle_topo_selection(
+                                                &mut new_selection,
+                                                TopoSelection::Edge(edge.id),
+                                            );
                                         }
                                     }
-                                }
-                            });
+                                });
                         }
 
-                        // Vertices
-                        if !vertices.is_empty() {
-                            let vert_id = ui.make_persistent_id("topo_vertices");
-                            egui::collapsing_header::CollapsingState::load_with_default_open(
-                                ui.ctx(),
-                                vert_id,
-                                false,
-                            )
-                            .show_header(ui, |ui| {
-                                ui.label(format!("Vertices ({})", vertices.len()));
-                            })
-                            .body(|ui| {
-                                for vert in &vertices {
-                                    let label = format!("Vertex {} (node {})", vert.id, vert.node_id);
-                                    let selected = new_selection == Some(TopoSelection::Vertex(vert.id));
-                                    if ui.selectable_label(selected, label).clicked() {
-                                        if selected {
-                                            new_selection = None;
-                                        } else {
-                                            new_selection = Some(TopoSelection::Vertex(vert.id));
-                                        }
+                        // Orphan vertices not referenced by any shown edge.
+                        let orphan_vertices: Vec<_> = vertices
+                            .iter()
+                            .filter(|v| !used_vertices.contains(&v.id))
+                            .cloned()
+                            .collect();
+                        if !orphan_vertices.is_empty() {
+                            egui::CollapsingHeader::new(format!(
+                                "Vertices ({})",
+                                orphan_vertices.len()
+                            ))
+                            .id_salt("topo_orphan_vertices")
+                            .default_open(!orphan_edges.is_empty())
+                            .show(ui, |ui| {
+                                for vertex in &orphan_vertices {
+                                    let selected =
+                                        new_selection == Some(TopoSelection::Vertex(vertex.id));
+                                    if ui
+                                        .selectable_label(
+                                            selected,
+                                            format!(
+                                                "Vertex {} (node {})",
+                                                vertex.id, vertex.node_id
+                                            ),
+                                        )
+                                        .clicked()
+                                    {
+                                        toggle_topo_selection(
+                                            &mut new_selection,
+                                            TopoSelection::Vertex(vertex.id),
+                                        );
                                     }
                                 }
                             });
@@ -570,6 +764,14 @@ impl eframe::App for RmshApp {
             );
             ui.painter().add(cb);
         });
+    }
+}
+
+fn toggle_topo_selection(selection: &mut Option<TopoSelection>, target: TopoSelection) {
+    if *selection == Some(target) {
+        *selection = None;
+    } else {
+        *selection = Some(target);
     }
 }
 
