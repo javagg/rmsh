@@ -1286,3 +1286,47 @@ fn handle_camera_input(
 
     needs_repaint
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    #[test]
+    fn viewer_step_to_3d_meshing_gmsh_roundtrip() {
+        let step_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("testdata")
+            .join("my_cube.step");
+
+        let step_bytes = std::fs::read(&step_path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", step_path.display(), e));
+
+        // Simulate viewer load pipeline: STEP -> mesh -> topology classification.
+        let step_mesh = rmsh_io::load_step_from_bytes(&step_bytes).expect("STEP parsing should succeed");
+        let topo = rmsh_geo::classify::classify(&step_mesh, 40.0);
+        assert!(!topo.faces.is_empty(), "classified topology should contain faces");
+
+        // Simulate 3D meshing action from viewer menu.
+        let volume_mesh = rmsh_algo::tetrahedralize_closed_surface(&step_mesh)
+            .expect("3D meshing should succeed for cube STEP");
+        assert!(
+            volume_mesh.elements_by_dimension(3).len() > 0,
+            "meshed result should contain 3D elements"
+        );
+
+        // Simulate viewer Save As Gmsh v4 and validate readback.
+        let mut v4_bytes = Vec::new();
+        rmsh_io::write_msh_v4(&mut v4_bytes, &volume_mesh).expect("MSH v4 write should succeed");
+        let v4_loaded = rmsh_io::load_msh_from_bytes(&v4_bytes).expect("MSH v4 readback should succeed");
+        assert_eq!(v4_loaded.node_count(), volume_mesh.node_count());
+        assert_eq!(v4_loaded.element_count(), volume_mesh.element_count());
+
+        // Simulate viewer Save As Gmsh v2 and validate readback.
+        let mut v2_bytes = Vec::new();
+        rmsh_io::write_msh_v2(&mut v2_bytes, &volume_mesh).expect("MSH v2 write should succeed");
+        let v2_loaded = rmsh_io::load_msh_from_bytes(&v2_bytes).expect("MSH v2 readback should succeed");
+        assert_eq!(v2_loaded.node_count(), volume_mesh.node_count());
+        assert_eq!(v2_loaded.element_count(), volume_mesh.element_count());
+    }
+}

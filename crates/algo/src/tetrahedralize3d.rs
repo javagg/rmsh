@@ -195,7 +195,18 @@ fn tetra_signed_volume6(a: Point3, b: Point3, c: Point3, d: Point3) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
+    use rmsh_io::{load_msh_from_bytes, load_step_from_bytes, write_msh_v2, write_msh_v4};
+
+    fn step_file_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("testdata")
+            .join(name)
+    }
 
     #[test]
     fn tetrahedralize_cube_surface() {
@@ -220,5 +231,33 @@ mod tests {
         let out = tetrahedralize_closed_surface(&mesh).expect("tetrahedralization should succeed");
         assert_eq!(out.elements_by_dimension(3).len(), 12);
         assert!(out.node_count() >= 9);
+    }
+
+    #[test]
+    fn step_mesh_can_be_saved_as_gmsh_v2_and_v4_after_3d_meshing() {
+        let step_path = step_file_path("my_cube.step");
+        let step_bytes = std::fs::read(&step_path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", step_path.display(), e));
+
+        let surface_mesh = load_step_from_bytes(&step_bytes).expect("STEP should parse");
+        let volume_mesh = tetrahedralize_closed_surface(&surface_mesh)
+            .expect("3D meshing should succeed for cube surface");
+
+        assert!(volume_mesh.node_count() > 0);
+        assert!(volume_mesh.elements_by_dimension(3).len() > 0);
+
+        // Save to Gmsh v4 and load back.
+        let mut v4_bytes = Vec::new();
+        write_msh_v4(&mut v4_bytes, &volume_mesh).expect("MSH v4 write should succeed");
+        let v4_loaded = load_msh_from_bytes(&v4_bytes).expect("MSH v4 readback should succeed");
+        assert_eq!(v4_loaded.node_count(), volume_mesh.node_count());
+        assert_eq!(v4_loaded.element_count(), volume_mesh.element_count());
+
+        // Save to Gmsh v2 and load back.
+        let mut v2_bytes = Vec::new();
+        write_msh_v2(&mut v2_bytes, &volume_mesh).expect("MSH v2 write should succeed");
+        let v2_loaded = load_msh_from_bytes(&v2_bytes).expect("MSH v2 readback should succeed");
+        assert_eq!(v2_loaded.node_count(), volume_mesh.node_count());
+        assert_eq!(v2_loaded.element_count(), volume_mesh.element_count());
     }
 }
