@@ -6,7 +6,7 @@ pub mod triangulate2d;
 pub use triangulate2d::{mesh_polygon, triangulate_points, MeshError, Polygon2D};
 
 pub mod tetrahedralize3d;
-pub use tetrahedralize3d::{tetrahedralize_closed_surface, Mesh3DError};
+pub use tetrahedralize3d::{tetrahedralize_closed_surface, CentroidStarMesher3D, Mesh3DError};
 
 // ─── Abstract traits ──────────────────────────────────────────────────────────
 

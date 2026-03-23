@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::thread;
 
 use eframe::egui_wgpu;
-use rmsh_algo::Polygon2D;
+use rmsh_algo::{MeshParams, Mesher3D, Polygon2D};
 use rmsh_geo::extract::{PointData, SurfaceData, WireframeData};
 use rmsh_model::{Mesh, Point3, Topology, Vector3, GSelection};
 use rmsh_renderer::{RenderConfig, Scene};
@@ -45,12 +45,16 @@ pub struct RmshApp {
     source_is_step: bool,
     /// Target edge length for 2D meshing.
     meshing_size: f64,
+    /// Target edge length for 3D meshing.
+    meshing_size_3d: f64,
     /// Whether a background meshing task is running.
     meshing_in_progress: bool,
     /// Current meshing progress [0, 1].
     meshing_progress: f32,
     /// Meshing status line.
     meshing_message: String,
+    /// Selected 3D meshing algorithm.
+    meshing_algo_3d: MeshingAlgo3D,
     /// Hidden geometric region IDs.
     hidden_regions: HashSet<usize>,
     /// Hidden geometric face IDs.
@@ -59,6 +63,21 @@ pub struct RmshApp {
     hidden_edges: HashSet<usize>,
     /// Hidden geometric vertex IDs.
     hidden_vertices: HashSet<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MeshingAlgo3D {
+    CentroidStar,
+    Delaunay,
+}
+
+impl MeshingAlgo3D {
+    fn label(self) -> &'static str {
+        match self {
+            Self::CentroidStar => "Centroid-Star (stable)",
+            Self::Delaunay => "Delaunay3D (experimental)",
+        }
+    }
 }
 
 impl RmshApp {
@@ -104,9 +123,11 @@ impl RmshApp {
             recent_files,
             source_is_step: false,
             meshing_size: 0.25,
+            meshing_size_3d: 0.25,
             meshing_in_progress: false,
             meshing_progress: 0.0,
             meshing_message: String::new(),
+            meshing_algo_3d: MeshingAlgo3D::CentroidStar,
             hidden_regions: HashSet::new(),
             hidden_faces: HashSet::new(),
             hidden_edges: HashSet::new(),
@@ -270,6 +291,8 @@ impl RmshApp {
         let Some(mesh) = self.mesh.clone() else {
             return;
         };
+        let algo = self.meshing_algo_3d;
+        let mesh_size_3d = self.meshing_size_3d;
 
         let queue = self.io_queue.clone();
         let egui_ctx = ctx.clone();
@@ -282,7 +305,7 @@ impl RmshApp {
             enqueue_event(
                 &queue,
                 IoEvent::MeshingStarted {
-                    message: "Start 3D tetrahedralization".to_string(),
+                    message: format!("Start 3D tetrahedralization ({})", algo.label()),
                 },
             );
             egui_ctx.request_repaint();
@@ -291,12 +314,28 @@ impl RmshApp {
                 &queue,
                 IoEvent::MeshingProgress {
                     progress: 0.35,
-                    message: "Building boundary and tetrahedra".to_string(),
+                    message: format!(
+                        "Building tetrahedra with {} (target size {:.4})",
+                        algo.label(),
+                        mesh_size_3d
+                    ),
                 },
             );
             egui_ctx.request_repaint();
 
-            match rmsh_algo::tetrahedralize_closed_surface(&mesh) {
+            let params = MeshParams::with_size(mesh_size_3d);
+            let result = match algo {
+                MeshingAlgo3D::CentroidStar => {
+                    let mesher = rmsh_algo::CentroidStarMesher3D;
+                    mesher.mesh_3d(&mesh, &params)
+                }
+                MeshingAlgo3D::Delaunay => {
+                    let mesher = rmsh_algo::Delaunay3D::default();
+                    mesher.mesh_3d(&mesh, &params)
+                }
+            };
+
+            match result {
                 Ok(generated) => {
                     enqueue_event(
                         &queue,
@@ -309,7 +348,13 @@ impl RmshApp {
                         &queue,
                         IoEvent::MeshGenerated {
                             mesh: generated,
-                            mesh_name: "meshed_volume_3d.msh".to_string(),
+                            mesh_name: format!(
+                                "meshed_volume_3d_{}.msh",
+                                match algo {
+                                    MeshingAlgo3D::CentroidStar => "centroid_star",
+                                    MeshingAlgo3D::Delaunay => "delaunay",
+                                }
+                            ),
                         },
                     );
                 }
@@ -753,6 +798,25 @@ impl eframe::App for RmshApp {
 
                     ui.menu_button("3D Meshing", |ui| {
                         ui.small("Generate tetrahedral volume mesh from closed surface.");
+                        ui.separator();
+                        ui.label("Algorithm");
+                        ui.radio_value(
+                            &mut self.meshing_algo_3d,
+                            MeshingAlgo3D::CentroidStar,
+                            MeshingAlgo3D::CentroidStar.label(),
+                        );
+                        ui.radio_value(
+                            &mut self.meshing_algo_3d,
+                            MeshingAlgo3D::Delaunay,
+                            MeshingAlgo3D::Delaunay.label(),
+                        );
+                        ui.separator();
+                        ui.label("Target edge length");
+                        ui.add(
+                            egui::DragValue::new(&mut self.meshing_size_3d)
+                                .range(0.001..=1.0e6)
+                                .speed(0.01),
+                        );
 
                         let can_start = self.source_is_step && !self.meshing_in_progress;
                         if !self.source_is_step {
@@ -1626,6 +1690,8 @@ fn handle_camera_input(
 mod tests {
     use std::path::PathBuf;
 
+    use rmsh_algo::{Delaunay3D, MeshParams, Mesher3D};
+
     #[test]
     fn viewer_step_to_3d_meshing_gmsh_roundtrip() {
         let step_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1663,5 +1729,95 @@ mod tests {
         let v2_loaded = rmsh_io::load_msh_from_bytes(&v2_bytes).expect("MSH v2 readback should succeed");
         assert_eq!(v2_loaded.node_count(), volume_mesh.node_count());
         assert_eq!(v2_loaded.element_count(), volume_mesh.element_count());
+    }
+
+    #[test]
+    fn viewer_step_to_3d_meshing_via_centroid_star_trait_roundtrip() {
+        let step_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("testdata")
+            .join("my_cube.step");
+
+        let step_bytes = std::fs::read(&step_path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", step_path.display(), e));
+
+        let step_mesh = rmsh_io::load_step_from_bytes(&step_bytes).expect("STEP parsing should succeed");
+
+        let params = MeshParams::with_size(0.25);
+        let mesher = rmsh_algo::CentroidStarMesher3D;
+        let volume_mesh = mesher
+            .mesh_3d(&step_mesh, &params)
+            .expect("Centroid-star meshing should succeed for cube STEP");
+        assert!(volume_mesh.elements_by_dimension(3).len() > 0);
+
+        let mut v4_bytes = Vec::new();
+        rmsh_io::write_msh_v4(&mut v4_bytes, &volume_mesh).expect("MSH v4 write should succeed");
+        let v4_loaded = rmsh_io::load_msh_from_bytes(&v4_bytes).expect("MSH v4 readback should succeed");
+        assert_eq!(v4_loaded.node_count(), volume_mesh.node_count());
+        assert_eq!(v4_loaded.element_count(), volume_mesh.element_count());
+    }
+
+    #[test]
+    fn viewer_step_to_3d_meshing_via_delaunay_trait_roundtrip() {
+        let step_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("testdata")
+            .join("my_cube.step");
+
+        let step_bytes = std::fs::read(&step_path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", step_path.display(), e));
+
+        let step_mesh = rmsh_io::load_step_from_bytes(&step_bytes).expect("STEP parsing should succeed");
+
+        let params = MeshParams::with_size(0.25);
+        let mesher = Delaunay3D::default();
+        let volume_mesh = mesher
+            .mesh_3d(&step_mesh, &params)
+            .expect("Delaunay3D meshing should succeed for cube STEP");
+        assert!(volume_mesh.elements_by_dimension(3).len() > 0);
+
+        let mut v2_bytes = Vec::new();
+        rmsh_io::write_msh_v2(&mut v2_bytes, &volume_mesh).expect("MSH v2 write should succeed");
+        let v2_loaded = rmsh_io::load_msh_from_bytes(&v2_bytes).expect("MSH v2 readback should succeed");
+        assert_eq!(v2_loaded.node_count(), volume_mesh.node_count());
+        assert_eq!(v2_loaded.element_count(), volume_mesh.element_count());
+    }
+
+    #[test]
+    fn viewer_step_to_3d_meshing_via_delaunay_respects_size() {
+        let step_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("testdata")
+            .join("my_cube.step");
+
+        let step_bytes = std::fs::read(&step_path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", step_path.display(), e));
+        let step_mesh = rmsh_io::load_step_from_bytes(&step_bytes).expect("STEP parsing should succeed");
+
+        let mut coarse = MeshParams::with_size(1.0);
+        coarse.max_size = 1.2;
+        coarse.optimize_passes = 2;
+
+        let mut fine = MeshParams::with_size(0.25);
+        fine.max_size = 0.3;
+        fine.optimize_passes = 2;
+
+        let mesher = Delaunay3D::default();
+        let coarse_mesh = mesher
+            .mesh_3d(&step_mesh, &coarse)
+            .expect("coarse Delaunay3D meshing should succeed");
+        let fine_mesh = mesher
+            .mesh_3d(&step_mesh, &fine)
+            .expect("fine Delaunay3D meshing should succeed");
+
+        let coarse_tets = coarse_mesh.elements_by_dimension(3).len();
+        let fine_tets = fine_mesh.elements_by_dimension(3).len();
+        assert!(
+            fine_tets > coarse_tets,
+            "smaller size should create denser mesh: coarse={coarse_tets}, fine={fine_tets}"
+        );
     }
 }
