@@ -5,3 +5,5 @@ edition.workspace = true
 
 [dependencies]
 rmsh-io = { workspace = true }
+rmsh-model = { workspace = true }
+thiserror = { workspace = true }
