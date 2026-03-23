@@ -33,8 +33,9 @@ pub fn request_open_dialog(queue: IoQueue, ctx: egui::Context) {
     spawn_dialog_task(async move {
         let file = rfd::AsyncFileDialog::new()
             .add_filter("Gmsh Mesh", &["msh"])
+            .add_filter("STEP Model", &["step", "stp"])
             .add_filter("All Files", &["*"])
-            .set_title("Open Mesh File")
+            .set_title("Open Mesh/STEP File")
             .pick_file()
             .await;
 

@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::path::PathBuf;
 
 use eframe::egui_wgpu;
@@ -91,7 +92,27 @@ impl RmshApp {
     }
 
     fn apply_loaded_mesh(&mut self, file_name: &str, data: &[u8], path: Option<PathBuf>) -> anyhow::Result<()> {
-        let mesh = rmsh_io::load_msh_from_bytes(data)?;
+        let ext = path
+            .as_ref()
+            .and_then(|p| p.extension())
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .or_else(|| {
+                Path::new(file_name)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.to_ascii_lowercase())
+            });
+
+        let mesh = match ext.as_deref() {
+            Some("msh") => rmsh_io::load_msh_from_bytes(data)
+                .map_err(anyhow::Error::from)?,
+            Some("step") | Some("stp") => rmsh_io::load_step_from_bytes(data)
+                .map_err(anyhow::Error::from)?,
+            _ => rmsh_io::load_msh_from_bytes(data)
+                .map_err(anyhow::Error::from)
+                .or_else(|_| rmsh_io::load_step_from_bytes(data).map_err(anyhow::Error::from))?,
+        };
         self.mesh_info = format!(
             "Nodes: {}  Elements: {}  File: {}",
             mesh.node_count(),
@@ -239,7 +260,7 @@ impl eframe::App for RmshApp {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
-                    if ui.button("Open MSH...").clicked() {
+                    if ui.button("Open...").clicked() {
                         request_open_dialog(self.io_queue.clone(), ctx.clone());
                         ui.close_menu();
                     }
