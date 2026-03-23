@@ -5,6 +5,7 @@ use std::thread;
 
 use eframe::egui_wgpu;
 use rmsh_algo::Polygon2D;
+use rmsh_geo::extract::{PointData, SurfaceData, WireframeData};
 use rmsh_model::{Mesh, Point3, Topology, Vector3, GSelection};
 use rmsh_renderer::{RenderConfig, Scene};
 
@@ -50,6 +51,14 @@ pub struct RmshApp {
     meshing_progress: f32,
     /// Meshing status line.
     meshing_message: String,
+    /// Hidden geometric region IDs.
+    hidden_regions: HashSet<usize>,
+    /// Hidden geometric face IDs.
+    hidden_faces: HashSet<usize>,
+    /// Hidden geometric edge IDs.
+    hidden_edges: HashSet<usize>,
+    /// Hidden geometric vertex IDs.
+    hidden_vertices: HashSet<usize>,
 }
 
 impl RmshApp {
@@ -98,6 +107,10 @@ impl RmshApp {
             meshing_in_progress: false,
             meshing_progress: 0.0,
             meshing_message: String::new(),
+            hidden_regions: HashSet::new(),
+            hidden_faces: HashSet::new(),
+            hidden_edges: HashSet::new(),
+            hidden_vertices: HashSet::new(),
         }
     }
 
@@ -151,6 +164,10 @@ impl RmshApp {
         self.topology = Some(topo);
         self.topo_selection = None;
         self.highlight_dirty = true;
+        self.hidden_regions.clear();
+        self.hidden_faces.clear();
+        self.hidden_edges.clear();
+        self.hidden_vertices.clear();
 
         self.mesh = Some(mesh);
         self.mesh_name = Some(file_name.to_string());
@@ -173,6 +190,10 @@ impl RmshApp {
         self.topology = Some(topo);
         self.topo_selection = None;
         self.highlight_dirty = true;
+        self.hidden_regions.clear();
+        self.hidden_faces.clear();
+        self.hidden_edges.clear();
+        self.hidden_vertices.clear();
 
         self.mesh = Some(mesh);
         self.mesh_name = Some(mesh_name);
@@ -301,6 +322,187 @@ impl RmshApp {
         });
     }
 
+    fn has_visibility_overrides(&self) -> bool {
+        !self.hidden_regions.is_empty()
+            || !self.hidden_faces.is_empty()
+            || !self.hidden_edges.is_empty()
+            || !self.hidden_vertices.is_empty()
+    }
+
+    fn extract_visible_geometry(&self, mesh: &Mesh, topo: &Topology) -> (SurfaceData, WireframeData, PointData) {
+        // Region -> faces ownership map
+        let mut face_to_regions: HashMap<usize, Vec<usize>> = HashMap::new();
+        for region in &topo.regions {
+            for fid in &region.face_ids {
+                face_to_regions.entry(*fid).or_default().push(region.id);
+            }
+        }
+
+        // Face -> edges ownership map
+        let mut edge_to_faces: HashMap<usize, Vec<usize>> = HashMap::new();
+        for face in &topo.faces {
+            for eid in &face.edge_ids {
+                edge_to_faces.entry(*eid).or_default().push(face.id);
+            }
+        }
+
+        // Node -> geometric vertex lookup
+        let node_to_vertex: HashMap<u64, usize> =
+            topo.vertices.iter().map(|v| (v.node_id, v.id)).collect();
+
+        let visible_regions: HashSet<usize> = topo
+            .regions
+            .iter()
+            .filter(|r| !self.hidden_regions.contains(&r.id))
+            .map(|r| r.id)
+            .collect();
+
+        let visible_faces: HashSet<usize> = topo
+            .faces
+            .iter()
+            .filter(|f| {
+                if self.hidden_faces.contains(&f.id) {
+                    return false;
+                }
+                match face_to_regions.get(&f.id) {
+                    Some(owners) if !owners.is_empty() => owners.iter().any(|rid| visible_regions.contains(rid)),
+                    _ => true,
+                }
+            })
+            .map(|f| f.id)
+            .collect();
+
+        let visible_edges: HashSet<usize> = topo
+            .edges
+            .iter()
+            .filter(|e| {
+                if self.hidden_edges.contains(&e.id) {
+                    return false;
+                }
+                match edge_to_faces.get(&e.id) {
+                    Some(owners) if !owners.is_empty() => owners.iter().any(|fid| visible_faces.contains(fid)),
+                    _ => true,
+                }
+            })
+            .map(|e| e.id)
+            .collect();
+
+        let visible_vertices: HashSet<usize> = topo
+            .vertices
+            .iter()
+            .filter(|v| !self.hidden_vertices.contains(&v.id))
+            .map(|v| v.id)
+            .collect();
+
+        let mut surface = SurfaceData {
+            positions: Vec::new(),
+            normals: Vec::new(),
+            colors: Vec::new(),
+            indices: Vec::new(),
+        };
+
+        for face in &topo.faces {
+            if !visible_faces.contains(&face.id) {
+                continue;
+            }
+            let color = [0.48, 0.62, 0.78];
+            for poly in &face.mesh_faces {
+                if poly.len() < 3 {
+                    continue;
+                }
+                let pts: Vec<[f32; 3]> = poly
+                    .iter()
+                    .filter_map(|nid| mesh.nodes.get(nid))
+                    .map(|n| [n.position.x as f32, n.position.y as f32, n.position.z as f32])
+                    .collect();
+                if pts.len() < 3 {
+                    continue;
+                }
+                let normal = compute_normal(pts[0], pts[1], pts[2]);
+                let base = surface.positions.len() as u32;
+                for p in &pts {
+                    surface.positions.push(*p);
+                    surface.normals.push(normal);
+                    surface.colors.push(color);
+                }
+                for i in 1..(pts.len() - 1) {
+                    surface.indices.push(base);
+                    surface.indices.push(base + i as u32);
+                    surface.indices.push(base + i as u32 + 1);
+                }
+            }
+        }
+
+        let mut wireframe = WireframeData {
+            positions: Vec::new(),
+            indices: Vec::new(),
+        };
+        for edge in &topo.edges {
+            if !visible_edges.contains(&edge.id) {
+                continue;
+            }
+            for seg in edge.node_ids.windows(2) {
+                let (Some(a), Some(b)) = (mesh.nodes.get(&seg[0]), mesh.nodes.get(&seg[1])) else {
+                    continue;
+                };
+                let idx = wireframe.positions.len() as u32;
+                wireframe
+                    .positions
+                    .push([a.position.x as f32, a.position.y as f32, a.position.z as f32]);
+                wireframe
+                    .positions
+                    .push([b.position.x as f32, b.position.y as f32, b.position.z as f32]);
+                wireframe.indices.push(idx);
+                wireframe.indices.push(idx + 1);
+            }
+        }
+
+        let mut points = PointData { positions: Vec::new() };
+        for vertex in &topo.vertices {
+            if !visible_vertices.contains(&vertex.id) {
+                continue;
+            }
+            // If this vertex is attached to edges, require at least one visible owner edge.
+            let mut has_visible_owner = false;
+            for edge in &topo.edges {
+                if !visible_edges.contains(&edge.id) {
+                    continue;
+                }
+                let mut endpoints: Vec<usize> = edge.vertex_ids.iter().filter_map(|v| *v).collect();
+                if endpoints.is_empty() {
+                    if let Some(first) = edge.node_ids.first().and_then(|nid| node_to_vertex.get(nid)) {
+                        endpoints.push(*first);
+                    }
+                    if let Some(last) = edge.node_ids.last().and_then(|nid| node_to_vertex.get(nid)) {
+                        if !endpoints.contains(last) {
+                            endpoints.push(*last);
+                        }
+                    }
+                }
+                if endpoints.contains(&vertex.id) {
+                    has_visible_owner = true;
+                    break;
+                }
+            }
+
+            let is_orphan = !topo.edges.iter().any(|e| {
+                e.vertex_ids.iter().flatten().any(|vid| *vid == vertex.id)
+                    || e.node_ids.first().map(|nid| node_to_vertex.get(nid) == Some(&vertex.id)).unwrap_or(false)
+                    || e.node_ids.last().map(|nid| node_to_vertex.get(nid) == Some(&vertex.id)).unwrap_or(false)
+            });
+
+            if has_visible_owner || is_orphan {
+                if let Some(n) = mesh.nodes.get(&vertex.node_id) {
+                    points
+                        .positions
+                        .push([n.position.x as f32, n.position.y as f32, n.position.z as f32]);
+                }
+            }
+        }
+
+        (surface, wireframe, points)
+    }
+
     fn upload_mesh_to_gpu(&mut self, render_state: &egui_wgpu::RenderState) {
         if self.scene_initialized {
             return;
@@ -309,14 +511,24 @@ impl RmshApp {
 
         let device = &render_state.device;
 
-        // Extract geometry — use topology-colored surface when available
-        let surface = if let Some(ref topo) = self.topology {
-            rmsh_geo::extract::extract_surface_colored(mesh, topo)
+        // Extract geometry — use per-entity visibility filtering when toggles are active.
+        let (surface, wireframe, points) = if let Some(ref topo) = self.topology {
+            if self.has_visibility_overrides() {
+                self.extract_visible_geometry(mesh, topo)
+            } else {
+                (
+                    rmsh_geo::extract::extract_surface_colored(mesh, topo),
+                    rmsh_geo::extract::extract_wireframe(mesh, &[1, 2, 3]),
+                    rmsh_geo::extract::extract_points(mesh),
+                )
+            }
         } else {
-            rmsh_geo::extract::extract_surface(mesh)
+            (
+                rmsh_geo::extract::extract_surface(mesh),
+                rmsh_geo::extract::extract_wireframe(mesh, &[1, 2, 3]),
+                rmsh_geo::extract::extract_points(mesh),
+            )
         };
-        let wireframe = rmsh_geo::extract::extract_wireframe(mesh, &[1, 2, 3]);
-        let points = rmsh_geo::extract::extract_points(mesh);
 
         // Upload to GPU and fit camera
         let mut renderer = render_state.renderer.write();
@@ -635,6 +847,7 @@ impl eframe::App for RmshApp {
 
         // Right panel — topology tree
         let mut reclassify = false;
+        let mut visibility_changed = false;
         egui::SidePanel::right("topology_panel")
             .default_width(220.0)
             .show(ctx, |ui| {
@@ -675,6 +888,91 @@ impl eframe::App for RmshApp {
                         topo.edges.len(),
                         topo.vertices.len(),
                     ));
+                    ui.separator();
+
+                    egui::CollapsingHeader::new("Visibility")
+                        .id_salt("topo_visibility")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.label("Toggle geometric entities:");
+
+                            egui::CollapsingHeader::new(format!("Regions ({})", topo.regions.len()))
+                                .id_salt("vis_regions")
+                                .default_open(false)
+                                .show(ui, |ui| {
+                                    for region in &topo.regions {
+                                        let mut visible = !self.hidden_regions.contains(&region.id);
+                                        if ui.checkbox(&mut visible, format!("Region {}", region.id)).changed() {
+                                            if visible {
+                                                self.hidden_regions.remove(&region.id);
+                                            } else {
+                                                self.hidden_regions.insert(region.id);
+                                            }
+                                            visibility_changed = true;
+                                        }
+                                    }
+                                });
+
+                            egui::CollapsingHeader::new(format!("Faces ({})", topo.faces.len()))
+                                .id_salt("vis_faces")
+                                .default_open(false)
+                                .show(ui, |ui| {
+                                    for face in &topo.faces {
+                                        let mut visible = !self.hidden_faces.contains(&face.id);
+                                        if ui.checkbox(&mut visible, format!("Face {}", face.id)).changed() {
+                                            if visible {
+                                                self.hidden_faces.remove(&face.id);
+                                            } else {
+                                                self.hidden_faces.insert(face.id);
+                                            }
+                                            visibility_changed = true;
+                                        }
+                                    }
+                                });
+
+                            egui::CollapsingHeader::new(format!("Edges ({})", topo.edges.len()))
+                                .id_salt("vis_edges")
+                                .default_open(false)
+                                .show(ui, |ui| {
+                                    for edge in &topo.edges {
+                                        let mut visible = !self.hidden_edges.contains(&edge.id);
+                                        if ui.checkbox(&mut visible, format!("Edge {}", edge.id)).changed() {
+                                            if visible {
+                                                self.hidden_edges.remove(&edge.id);
+                                            } else {
+                                                self.hidden_edges.insert(edge.id);
+                                            }
+                                            visibility_changed = true;
+                                        }
+                                    }
+                                });
+
+                            egui::CollapsingHeader::new(format!("Vertices ({})", topo.vertices.len()))
+                                .id_salt("vis_vertices")
+                                .default_open(false)
+                                .show(ui, |ui| {
+                                    for vertex in &topo.vertices {
+                                        let mut visible = !self.hidden_vertices.contains(&vertex.id);
+                                        if ui.checkbox(&mut visible, format!("Vertex {}", vertex.id)).changed() {
+                                            if visible {
+                                                self.hidden_vertices.remove(&vertex.id);
+                                            } else {
+                                                self.hidden_vertices.insert(vertex.id);
+                                            }
+                                            visibility_changed = true;
+                                        }
+                                    }
+                                });
+
+                            if ui.small_button("Show All").clicked() {
+                                self.hidden_regions.clear();
+                                self.hidden_faces.clear();
+                                self.hidden_edges.clear();
+                                self.hidden_vertices.clear();
+                                visibility_changed = true;
+                            }
+                        });
+
                     ui.separator();
 
                     // Tree view (Volume -> Face -> Edge -> Vertex)
@@ -994,6 +1292,22 @@ impl eframe::App for RmshApp {
                 }
             });
 
+        if visibility_changed {
+            self.scene_initialized = false;
+            self.highlight_dirty = true;
+            if let Some(sel) = self.topo_selection {
+                let hidden = match sel {
+                    GSelection::Region(id) => self.hidden_regions.contains(&id),
+                    GSelection::Face(id) => self.hidden_faces.contains(&id),
+                    GSelection::Edge(id) => self.hidden_edges.contains(&id),
+                    GSelection::Vertex(id) => self.hidden_vertices.contains(&id),
+                };
+                if hidden {
+                    self.topo_selection = None;
+                }
+            }
+        }
+
         // Re-classify topology if angle threshold changed
         if reclassify {
             if let Some(ref mesh) = self.mesh {
@@ -1001,6 +1315,11 @@ impl eframe::App for RmshApp {
                 self.topology = Some(new_topo);
                 self.topo_selection = None;
                 self.highlight_dirty = true;
+                self.hidden_regions.clear();
+                self.hidden_faces.clear();
+                self.hidden_edges.clear();
+                self.hidden_vertices.clear();
+                self.scene_initialized = false;
             }
         }
 
@@ -1231,6 +1550,22 @@ fn polygon_from_face(
     }
 
     Ok(Polygon2D::new(vertices))
+}
+
+fn compute_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
+    let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+    let n = [
+        ab[1] * ac[2] - ab[2] * ac[1],
+        ab[2] * ac[0] - ab[0] * ac[2],
+        ab[0] * ac[1] - ab[1] * ac[0],
+    ];
+    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+    if len > 1e-10 {
+        [n[0] / len, n[1] / len, n[2] / len]
+    } else {
+        [0.0, 0.0, 1.0]
+    }
 }
 
 fn toggle_topo_selection(selection: &mut Option<GSelection>, target: GSelection) {
