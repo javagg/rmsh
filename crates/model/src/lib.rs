@@ -6,6 +6,9 @@ pub mod topology;
 pub use element::{Element, ElementType};
 pub use mesh::Mesh;
 pub use node::Node;
+pub use topology::{GModel, GVertex, GEdge, GFace, GRegion, GSelection};
+
+// Backward compatibility aliases
 pub use topology::{Topology, TopoVertex, TopoEdge, TopoFace, TopoVolume, TopoSelection};
 
 /// 3D point type alias

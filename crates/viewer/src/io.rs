@@ -9,6 +9,9 @@ pub type IoQueue = Arc<Mutex<VecDeque<IoEvent>>>;
 #[derive(Debug)]
 pub enum IoEvent {
     MeshLoaded { file_name: String, data: Vec<u8>, path: Option<PathBuf> },
+    MeshGenerated { mesh: Mesh, mesh_name: String },
+    MeshingStarted { message: String },
+    MeshingProgress { progress: f32, message: String },
     Error(String),
 }
 
@@ -115,6 +118,10 @@ fn push_event(queue: &IoQueue, event: IoEvent) {
     if let Ok(mut queue) = queue.lock() {
         queue.push_back(event);
     }
+}
+
+pub fn enqueue_event(queue: &IoQueue, event: IoEvent) {
+    push_event(queue, event);
 }
 
 #[cfg(not(target_arch = "wasm32"))]

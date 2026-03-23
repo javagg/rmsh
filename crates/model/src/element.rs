@@ -275,4 +275,67 @@ mod tests {
         assert_eq!(ElementType::Unknown(14).faces().len(), 5);
         assert_eq!(ElementType::Unknown(14).edges().len(), 8);
     }
+
+    #[test]
+    fn all_element_types_have_correct_dimension() {
+        // 0-Dimensional (Point)
+        assert_eq!(ElementType::Point1.dimension(), 0);
+
+        // 1-Dimensional (Curve/Edge)
+        assert_eq!(ElementType::Line2.dimension(), 1);
+
+        // 2-Dimensional (Surface/Face)
+        assert_eq!(ElementType::Triangle3.dimension(), 2);
+        assert_eq!(ElementType::Quad4.dimension(), 2);
+
+        // 3-Dimensional (Volume/Region)
+        assert_eq!(ElementType::Tetrahedron4.dimension(), 3);
+        assert_eq!(ElementType::Hexahedron8.dimension(), 3);
+        assert_eq!(ElementType::Prism6.dimension(), 3);
+        assert_eq!(ElementType::Pyramid5.dimension(), 3);
+
+        // Unknown types should infer dimension from Gmsh type ID
+        // Gmsh type IDs: 15=point, 1–8,26–28=line, 2–3,9–10,16,20–25,36–51=face, 4–7,11–14,17–19,29–31,90–93,118–119=volume
+        assert_eq!(ElementType::Unknown(15).dimension(), 0); // point
+        assert_eq!(ElementType::Unknown(1).dimension(), 1);  // line2
+        assert_eq!(ElementType::Unknown(2).dimension(), 2);  // tri3
+        assert_eq!(ElementType::Unknown(3).dimension(), 2);  // quad4
+        assert_eq!(ElementType::Unknown(4).dimension(), 3);  // tet4
+        assert_eq!(ElementType::Unknown(5).dimension(), 3);  // hex8
+    }
+
+    #[test]
+    fn element_dimension_aligns_with_node_count() {
+        // Point: 1 node
+        assert_eq!(ElementType::Point1.node_count(), 1);
+        assert_eq!(ElementType::Point1.dimension(), 0);
+
+        // Line: 2 nodes
+        assert_eq!(ElementType::Line2.node_count(), 2);
+        assert_eq!(ElementType::Line2.dimension(), 1);
+
+        // Triangle: 3 nodes
+        assert_eq!(ElementType::Triangle3.node_count(), 3);
+        assert_eq!(ElementType::Triangle3.dimension(), 2);
+
+        // Quad: 4 nodes
+        assert_eq!(ElementType::Quad4.node_count(), 4);
+        assert_eq!(ElementType::Quad4.dimension(), 2);
+
+        // Tet: 4 nodes
+        assert_eq!(ElementType::Tetrahedron4.node_count(), 4);
+        assert_eq!(ElementType::Tetrahedron4.dimension(), 3);
+
+        // Hex: 8 nodes
+        assert_eq!(ElementType::Hexahedron8.node_count(), 8);
+        assert_eq!(ElementType::Hexahedron8.dimension(), 3);
+
+        // Prism: 6 nodes
+        assert_eq!(ElementType::Prism6.node_count(), 6);
+        assert_eq!(ElementType::Prism6.dimension(), 3);
+
+        // Pyramid: 5 nodes
+        assert_eq!(ElementType::Pyramid5.node_count(), 5);
+        assert_eq!(ElementType::Pyramid5.dimension(), 3);
+    }
 }

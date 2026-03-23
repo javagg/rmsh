@@ -1,13 +1,15 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::path::PathBuf;
+use std::thread;
 
 use eframe::egui_wgpu;
-use rmsh_model::{Mesh, Topology, TopoSelection};
+use rmsh_algo::Polygon2D;
+use rmsh_model::{Mesh, Point3, Topology, Vector3, GSelection};
 use rmsh_renderer::{RenderConfig, Scene};
 
 use crate::io::{
-    default_save_name, drain_io_events, new_io_queue, request_open_dialog, request_open_path,
+    default_save_name, drain_io_events, enqueue_event, new_io_queue, request_open_dialog, request_open_path,
     request_save_dialog, IoEvent, IoQueue, MshSaveFormat,
 };
 use crate::viewport::ViewportCallback;
@@ -28,16 +30,26 @@ pub struct RmshApp {
     render_state: Option<egui_wgpu::RenderState>,
     /// Pending IO events from dialogs and drag-and-drop.
     io_queue: IoQueue,
-    /// Classified topology.
+    /// Classified geometric model.
     topology: Option<Topology>,
-    /// Currently selected topology entity.
-    topo_selection: Option<TopoSelection>,
+    /// Currently selected geometric entity.
+    topo_selection: Option<GSelection>,
     /// Whether the highlight GPU data needs to be re-uploaded.
     highlight_dirty: bool,
-    /// Dihedral angle threshold for topology classification (degrees).
+    /// Dihedral angle threshold for geometric classification (degrees).
     angle_threshold_deg: f64,
     /// Recently opened file paths (most recent first, capped at 10).
     recent_files: Vec<PathBuf>,
+    /// Whether the currently loaded mesh came from a STEP file.
+    source_is_step: bool,
+    /// Target edge length for 2D meshing.
+    meshing_size: f64,
+    /// Whether a background meshing task is running.
+    meshing_in_progress: bool,
+    /// Current meshing progress [0, 1].
+    meshing_progress: f32,
+    /// Meshing status line.
+    meshing_message: String,
 }
 
 impl RmshApp {
@@ -81,6 +93,11 @@ impl RmshApp {
             highlight_dirty: false,
             angle_threshold_deg: 40.0,
             recent_files,
+            source_is_step: false,
+            meshing_size: 0.25,
+            meshing_in_progress: false,
+            meshing_progress: 0.0,
+            meshing_message: String::new(),
         }
     }
 
@@ -104,6 +121,8 @@ impl RmshApp {
                     .map(|e| e.to_ascii_lowercase())
             });
 
+        self.source_is_step = matches!(ext.as_deref(), Some("step") | Some("stp"));
+
         let mesh = match ext.as_deref() {
             Some("msh") => rmsh_io::load_msh_from_bytes(data)
                 .map_err(anyhow::Error::from)?,
@@ -123,8 +142,8 @@ impl RmshApp {
         // Classify topology
         let topo = rmsh_geo::classify::classify(&mesh, self.angle_threshold_deg);
         log::info!(
-            "Topology: {} volumes, {} faces, {} edges, {} vertices",
-            topo.volumes.len(),
+            "Topology: {} regions, {} faces, {} edges, {} vertices",
+            topo.regions.len(),
             topo.faces.len(),
             topo.edges.len(),
             topo.vertices.len(),
@@ -140,6 +159,86 @@ impl RmshApp {
             self.push_recent(p);
         }
         Ok(())
+    }
+
+    fn apply_generated_mesh(&mut self, mesh: Mesh, mesh_name: String) {
+        self.mesh_info = format!(
+            "Nodes: {}  Elements: {}  File: {}",
+            mesh.node_count(),
+            mesh.element_count(),
+            mesh_name
+        );
+
+        let topo = rmsh_geo::classify::classify(&mesh, self.angle_threshold_deg);
+        self.topology = Some(topo);
+        self.topo_selection = None;
+        self.highlight_dirty = true;
+
+        self.mesh = Some(mesh);
+        self.mesh_name = Some(mesh_name);
+        self.source_is_step = false;
+        self.scene_initialized = false;
+    }
+
+    fn start_2d_meshing(&mut self, ctx: &egui::Context) {
+        if self.meshing_in_progress {
+            return;
+        }
+
+        let Some(mesh) = self.mesh.clone() else {
+            return;
+        };
+        let Some(topo) = self.topology.clone() else {
+            return;
+        };
+        let Some(GSelection::Face(face_id)) = self.topo_selection else {
+            return;
+        };
+
+        let mesh_size = self.meshing_size;
+        let queue = self.io_queue.clone();
+        let egui_ctx = ctx.clone();
+
+        self.meshing_in_progress = true;
+        self.meshing_progress = 0.0;
+        self.meshing_message = "Preparing 2D meshing".to_string();
+
+        thread::spawn(move || {
+            enqueue_event(
+                &queue,
+                IoEvent::MeshingStarted {
+                    message: format!("Start meshing face {}", face_id),
+                },
+            );
+            egui_ctx.request_repaint();
+
+            let mut report = |progress: f32, message: &str| {
+                enqueue_event(
+                    &queue,
+                    IoEvent::MeshingProgress {
+                        progress,
+                        message: message.to_string(),
+                    },
+                );
+                egui_ctx.request_repaint();
+            };
+
+            match mesh_face_async(&mesh, &topo, face_id, mesh_size, &mut report) {
+                Ok(generated) => {
+                    enqueue_event(
+                        &queue,
+                        IoEvent::MeshGenerated {
+                            mesh: generated,
+                            mesh_name: format!("meshed_face_{}.msh", face_id),
+                        },
+                    );
+                }
+                Err(err) => {
+                    enqueue_event(&queue, IoEvent::Error(err));
+                }
+            }
+            egui_ctx.request_repaint();
+        });
     }
 
     fn upload_mesh_to_gpu(&mut self, render_state: &egui_wgpu::RenderState) {
@@ -229,7 +328,27 @@ impl eframe::App for RmshApp {
                         Err(e) => log::error!("Failed to load mesh: {}", e),
                     }
                 }
+                IoEvent::MeshGenerated { mesh, mesh_name } => {
+                    self.apply_generated_mesh(mesh, mesh_name.clone());
+                    self.meshing_in_progress = false;
+                    self.meshing_progress = 1.0;
+                    self.meshing_message = format!("2D meshing finished: {}", mesh_name);
+                    log::info!("{}", self.meshing_message);
+                }
+                IoEvent::MeshingStarted { message } => {
+                    self.meshing_in_progress = true;
+                    self.meshing_progress = 0.0;
+                    self.meshing_message = message;
+                }
+                IoEvent::MeshingProgress { progress, message } => {
+                    self.meshing_progress = progress.clamp(0.0, 1.0);
+                    self.meshing_message = message;
+                }
                 IoEvent::Error(message) => {
+                    if self.meshing_in_progress {
+                        self.meshing_in_progress = false;
+                        self.meshing_message = format!("Meshing failed: {}", message);
+                    }
                     log::error!("{}", message);
                 }
             }
@@ -318,6 +437,47 @@ impl eframe::App for RmshApp {
                     if ui.button("Quit").clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
+                });
+
+                ui.menu_button("Meshing", |ui| {
+                    ui.menu_button("2D Meshing", |ui| {
+                        ui.label("Target edge length");
+                        ui.add(
+                            egui::DragValue::new(&mut self.meshing_size)
+                                .range(0.001..=1.0e6)
+                                .speed(0.01),
+                        );
+
+                        ui.separator();
+                        let is_face_selected = matches!(self.topo_selection, Some(GSelection::Face(_)));
+                        if !self.source_is_step {
+                            ui.small("Load a STEP model to enable 2D meshing.");
+                        } else if !is_face_selected {
+                            ui.small("Select one face in the Topology panel first.");
+                        }
+
+                        let can_start = self.source_is_step
+                            && is_face_selected
+                            && !self.meshing_in_progress
+                            && self.meshing_size > 0.0;
+
+                        if ui
+                            .add_enabled(can_start, egui::Button::new("Triangulate Selected Face"))
+                            .clicked()
+                        {
+                            self.start_2d_meshing(ctx);
+                            ui.close_menu();
+                        }
+
+                        if self.meshing_in_progress {
+                            ui.separator();
+                            ui.add(
+                                egui::ProgressBar::new(self.meshing_progress)
+                                    .show_percentage()
+                                    .text(&self.meshing_message),
+                            );
+                        }
+                    });
                 });
             });
         });
@@ -424,7 +584,7 @@ impl eframe::App for RmshApp {
                     // Summary
                     ui.label(format!(
                         "V:{} F:{} E:{} P:{}",
-                        topo.volumes.len(),
+                        topo.regions.len(),
                         topo.faces.len(),
                         topo.edges.len(),
                         topo.vertices.len(),
@@ -434,7 +594,7 @@ impl eframe::App for RmshApp {
                     // Tree view (Volume -> Face -> Edge -> Vertex)
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         // Clone data we need so we don't borrow self immutably during UI interaction.
-                        let volumes = topo.volumes.clone();
+                        let volumes = topo.regions.clone();
                         let faces = topo.faces.clone();
                         let edges = topo.edges.clone();
                         let vertices = topo.vertices.clone();
@@ -525,7 +685,7 @@ impl eframe::App for RmshApp {
                                                             for vid in vids {
                                                                 if let Some(vertex) = vertex_map.get(&vid) {
                                                                     let selected = new_selection
-                                                                        == Some(TopoSelection::Vertex(vertex.id));
+                                                                        == Some(GSelection::Vertex(vertex.id));
                                                                     if ui
                                                                         .selectable_label(
                                                                             selected,
@@ -538,7 +698,7 @@ impl eframe::App for RmshApp {
                                                                     {
                                                                         toggle_topo_selection(
                                                                             &mut new_selection,
-                                                                            TopoSelection::Vertex(vertex.id),
+                                                                            GSelection::Vertex(vertex.id),
                                                                         );
                                                                     }
                                                                 }
@@ -548,7 +708,7 @@ impl eframe::App for RmshApp {
                                                         if edge_header.header_response.clicked() {
                                                             toggle_topo_selection(
                                                                 &mut new_selection,
-                                                                TopoSelection::Edge(edge.id),
+                                                                GSelection::Edge(edge.id),
                                                             );
                                                         }
                                                     }
@@ -557,7 +717,7 @@ impl eframe::App for RmshApp {
                                                 if face_header.header_response.clicked() {
                                                     toggle_topo_selection(
                                                         &mut new_selection,
-                                                        TopoSelection::Face(face.id),
+                                                        GSelection::Face(face.id),
                                                     );
                                                 }
                                             }
@@ -566,7 +726,7 @@ impl eframe::App for RmshApp {
                                         if header.header_response.clicked() {
                                             toggle_topo_selection(
                                                 &mut new_selection,
-                                                TopoSelection::Volume(vol.id),
+                                                GSelection::Region(vol.id),
                                             );
                                         }
                                     }
@@ -600,7 +760,7 @@ impl eframe::App for RmshApp {
                                                     continue;
                                                 };
                                                 let selected =
-                                                    new_selection == Some(TopoSelection::Edge(edge.id));
+                                                    new_selection == Some(GSelection::Edge(edge.id));
                                                 if ui
                                                     .selectable_label(
                                                         selected,
@@ -614,7 +774,7 @@ impl eframe::App for RmshApp {
                                                 {
                                                     toggle_topo_selection(
                                                         &mut new_selection,
-                                                        TopoSelection::Edge(edge.id),
+                                                        GSelection::Edge(edge.id),
                                                     );
                                                 }
                                             }
@@ -622,7 +782,7 @@ impl eframe::App for RmshApp {
                                         if face_header.header_response.clicked() {
                                             toggle_topo_selection(
                                                 &mut new_selection,
-                                                TopoSelection::Face(face.id),
+                                                GSelection::Face(face.id),
                                             );
                                         }
                                     }
@@ -673,7 +833,7 @@ impl eframe::App for RmshApp {
                                             for vid in vids {
                                                 if let Some(vertex) = vertex_map.get(&vid) {
                                                     let selected = new_selection
-                                                        == Some(TopoSelection::Vertex(vertex.id));
+                                                        == Some(GSelection::Vertex(vertex.id));
                                                     if ui
                                                         .selectable_label(
                                                             selected,
@@ -686,7 +846,7 @@ impl eframe::App for RmshApp {
                                                     {
                                                         toggle_topo_selection(
                                                             &mut new_selection,
-                                                            TopoSelection::Vertex(vertex.id),
+                                                            GSelection::Vertex(vertex.id),
                                                         );
                                                     }
                                                 }
@@ -695,7 +855,7 @@ impl eframe::App for RmshApp {
                                         if edge_header.header_response.clicked() {
                                             toggle_topo_selection(
                                                 &mut new_selection,
-                                                TopoSelection::Edge(edge.id),
+                                                GSelection::Edge(edge.id),
                                             );
                                         }
                                     }
@@ -718,7 +878,7 @@ impl eframe::App for RmshApp {
                             .show(ui, |ui| {
                                 for vertex in &orphan_vertices {
                                     let selected =
-                                        new_selection == Some(TopoSelection::Vertex(vertex.id));
+                                        new_selection == Some(GSelection::Vertex(vertex.id));
                                     if ui
                                         .selectable_label(
                                             selected,
@@ -731,7 +891,7 @@ impl eframe::App for RmshApp {
                                     {
                                         toggle_topo_selection(
                                             &mut new_selection,
-                                            TopoSelection::Vertex(vertex.id),
+                                            GSelection::Vertex(vertex.id),
                                         );
                                     }
                                 }
@@ -762,6 +922,17 @@ impl eframe::App for RmshApp {
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(&self.mesh_info);
+                if self.meshing_in_progress || !self.meshing_message.is_empty() {
+                    ui.separator();
+                    ui.label(&self.meshing_message);
+                    if self.meshing_in_progress {
+                        ui.add(
+                            egui::ProgressBar::new(self.meshing_progress)
+                                .desired_width(140.0)
+                                .show_percentage(),
+                        );
+                    }
+                }
             });
         });
 
@@ -788,7 +959,195 @@ impl eframe::App for RmshApp {
     }
 }
 
-fn toggle_topo_selection(selection: &mut Option<TopoSelection>, target: TopoSelection) {
+fn mesh_face_async(
+    mesh: &Mesh,
+    topo: &Topology,
+    face_id: usize,
+    mesh_size: f64,
+    report: &mut dyn FnMut(f32, &str),
+) -> Result<Mesh, String> {
+    if mesh_size <= 0.0 {
+        return Err("mesh_size must be positive".to_string());
+    }
+
+    report(0.1, "Preparing selected face");
+    let face = topo
+        .faces
+        .iter()
+        .find(|f| f.id == face_id)
+        .ok_or_else(|| format!("Face {} not found in topology", face_id))?;
+
+    if face.mesh_faces.is_empty() {
+        return Err(format!("Face {} has no mesh polygons", face_id));
+    }
+
+    report(0.25, "Collecting face nodes");
+    let mut face_node_ids: HashSet<u64> = HashSet::new();
+    for poly in &face.mesh_faces {
+        for nid in poly {
+            face_node_ids.insert(*nid);
+        }
+    }
+    if face_node_ids.len() < 3 {
+        return Err(format!("Face {} has fewer than 3 unique nodes", face_id));
+    }
+
+    let mut node_points: Vec<(u64, Point3)> = Vec::with_capacity(face_node_ids.len());
+    for nid in &face_node_ids {
+        let node = mesh
+            .nodes
+            .get(nid)
+            .ok_or_else(|| format!("Node {} not found in mesh", nid))?;
+        node_points.push((*nid, node.position));
+    }
+
+    // Build a local 2D frame on the selected face plane.
+    let p0 = node_points[0].1;
+    let mut basis: Option<(Vector3, Vector3)> = None;
+    for i in 1..node_points.len() {
+        let u_try = node_points[i].1 - p0;
+        if u_try.norm() < 1e-12 {
+            continue;
+        }
+        for j in (i + 1)..node_points.len() {
+            let v_try = node_points[j].1 - p0;
+            let n = u_try.cross(&v_try);
+            if n.norm() > 1e-10 {
+                let u = u_try.normalize();
+                let n_norm = n.normalize();
+                let v = n_norm.cross(&u).normalize();
+                basis = Some((u, v));
+                break;
+            }
+        }
+        if basis.is_some() {
+            break;
+        }
+    }
+
+    let (u_axis, v_axis) = basis.ok_or_else(|| {
+        format!(
+            "Face {} appears degenerate (cannot construct local plane basis)",
+            face_id
+        )
+    })?;
+
+    report(0.4, "Extracting boundary loop");
+    let polygon = polygon_from_face(mesh, face, p0, u_axis, v_axis)?;
+
+    report(0.65, "Running 2D triangulation");
+    let mut generated = rmsh_algo::mesh_polygon(&polygon, mesh_size).map_err(|e| e.to_string())?;
+
+    report(0.85, "Projecting 2D mesh back to 3D");
+    for node in generated.nodes.values_mut() {
+        let x = node.position.x;
+        let y = node.position.y;
+        let p3 = p0 + u_axis * x + v_axis * y;
+        node.position = p3;
+    }
+
+    report(1.0, "Meshing complete");
+    Ok(generated)
+}
+
+fn polygon_from_face(
+    mesh: &Mesh,
+    face: &rmsh_model::GFace,
+    origin: Point3,
+    u_axis: Vector3,
+    v_axis: Vector3,
+) -> Result<Polygon2D, String> {
+    let mut edge_counts: BTreeMap<(u64, u64), usize> = BTreeMap::new();
+    for poly in &face.mesh_faces {
+        if poly.len() < 2 {
+            continue;
+        }
+        for i in 0..poly.len() {
+            let a = poly[i];
+            let b = poly[(i + 1) % poly.len()];
+            let key = if a < b { (a, b) } else { (b, a) };
+            *edge_counts.entry(key).or_insert(0) += 1;
+        }
+    }
+
+    let boundary_edges: Vec<(u64, u64)> = edge_counts
+        .iter()
+        .filter_map(|(edge, count)| (*count == 1).then_some(*edge))
+        .collect();
+    if boundary_edges.is_empty() {
+        return Err("Could not find a boundary loop for selected face".to_string());
+    }
+
+    let mut adjacency: HashMap<u64, Vec<u64>> = HashMap::new();
+    for (a, b) in &boundary_edges {
+        adjacency.entry(*a).or_default().push(*b);
+        adjacency.entry(*b).or_default().push(*a);
+    }
+
+    if adjacency.values().any(|neighbors| neighbors.len() != 2) {
+        return Err(
+            "Selected face has non-manifold boundary; only single closed-loop faces are supported"
+                .to_string(),
+        );
+    }
+
+    let start = *adjacency
+        .keys()
+        .min()
+        .ok_or_else(|| "Boundary loop is empty".to_string())?;
+    let mut loop_nodes = vec![start];
+    let mut prev: Option<u64> = None;
+    let mut current = start;
+
+    for _ in 0..=boundary_edges.len() {
+        let neighbors = adjacency
+            .get(&current)
+            .ok_or_else(|| format!("Boundary node {} has no neighbors", current))?;
+        let next = match prev {
+            Some(p) => neighbors
+                .iter()
+                .copied()
+                .find(|n| *n != p)
+                .ok_or_else(|| format!("Boundary walk failed at node {}", current))?,
+            None => neighbors[0],
+        };
+
+        if next == start {
+            break;
+        }
+
+        loop_nodes.push(next);
+        prev = Some(current);
+        current = next;
+    }
+
+    let closes = adjacency
+        .get(&current)
+        .map(|neighbors| neighbors.contains(&start))
+        .unwrap_or(false);
+    if !closes {
+        return Err("Failed to close face boundary loop".to_string());
+    }
+
+    if loop_nodes.len() < 3 {
+        return Err("Boundary loop has fewer than 3 vertices".to_string());
+    }
+
+    let mut vertices = Vec::with_capacity(loop_nodes.len());
+    for nid in &loop_nodes {
+        let point = mesh
+            .nodes
+            .get(nid)
+            .map(|n| n.position)
+            .ok_or_else(|| format!("Boundary node {} not found in mesh", nid))?;
+        let d = point - origin;
+        vertices.push([d.dot(&u_axis), d.dot(&v_axis)]);
+    }
+
+    Ok(Polygon2D::new(vertices))
+}
+
+fn toggle_topo_selection(selection: &mut Option<GSelection>, target: GSelection) {
     if *selection == Some(target) {
         *selection = None;
     } else {

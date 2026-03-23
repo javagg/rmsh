@@ -265,7 +265,7 @@ pub fn classify(mesh: &Mesh, angle_threshold_deg: f64) -> Topology {
         vertices: topo_vertices,
         edges: topo_edges,
         faces: topo_faces,
-        volumes: topo_volumes,
+        regions: topo_volumes,
         angle_threshold_deg,
     }
 }
@@ -491,10 +491,10 @@ mod tests {
         mesh.add_element(Element::new(2, ElementType::Tetrahedron4, vec![1, 2, 3, 5]));
 
         let topo = classify(&mesh, 40.0);
-        assert_eq!(topo.volumes.len(), 1);
-        assert_eq!(topo.volumes[0].element_ids.len(), 2);
-        assert!(!topo.volumes[0].face_ids.is_empty());
-        for fid in &topo.volumes[0].face_ids {
+        assert_eq!(topo.regions.len(), 1);
+        assert_eq!(topo.regions[0].element_ids.len(), 2);
+        assert!(!topo.regions[0].face_ids.is_empty());
+        for fid in &topo.regions[0].face_ids {
             assert!(*fid < topo.faces.len());
         }
     }
@@ -519,7 +519,7 @@ mod tests {
         mesh.add_element(Element::new(2, ElementType::Tetrahedron4, vec![1, 5, 6, 7]));
 
         let topo = classify(&mesh, 40.0);
-        assert_eq!(topo.volumes.len(), 2);
+        assert_eq!(topo.regions.len(), 2);
     }
 
     #[test]
@@ -541,7 +541,7 @@ mod tests {
 
         let topo = classify(&mesh, 40.0);
         assert_eq!(topo.faces.len(), 0);
-        assert_eq!(topo.volumes.len(), 0);
+        assert_eq!(topo.regions.len(), 0);
         assert_eq!(topo.edges.len(), 2);
         assert!(topo.vertices.iter().any(|v| v.node_id == 4));
     }

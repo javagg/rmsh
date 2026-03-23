@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
-use rmsh_model::{Mesh, Topology, TopoSelection};
+use rmsh_model::{Mesh, Topology, GSelection};
+
 
 /// Extracted surface data ready for rendering.
 pub struct SurfaceData {
@@ -258,11 +259,11 @@ pub fn extract_surface_colored(mesh: &Mesh, topo: &Topology) -> SurfaceData {
     SurfaceData { positions, normals, colors: out_colors, indices }
 }
 
-/// Extract highlight surface and wireframe for a selected topology entity.
+/// Extract highlight surface and wireframe for a selected geometric entity.
 pub fn extract_highlight(
     mesh: &Mesh,
     topo: &Topology,
-    selection: &TopoSelection,
+    selection: &GSelection,
 ) -> (Option<SurfaceData>, Option<WireframeData>) {
     let get_pos = |node_id: u64| -> [f32; 3] {
         let node = &mesh.nodes[&node_id];
@@ -270,7 +271,7 @@ pub fn extract_highlight(
     };
 
     match *selection {
-        TopoSelection::Face(id) => {
+        GSelection::Face(id) => {
             if let Some(tface) = topo.faces.get(id) {
                 let mut positions = Vec::new();
                 let mut normals = Vec::new();
@@ -290,7 +291,7 @@ pub fn extract_highlight(
                 (None, None)
             }
         }
-        TopoSelection::Edge(id) => {
+        GSelection::Edge(id) => {
             if let Some(tedge) = topo.edges.get(id) {
                 let mut positions = Vec::new();
                 let mut indices = Vec::new();
@@ -311,10 +312,10 @@ pub fn extract_highlight(
                 (None, None)
             }
         }
-        TopoSelection::Volume(id) => {
-            if let Some(tvol) = topo.volumes.get(id) {
-                // Highlight all boundary faces of this volume's elements
-                let elem_ids: HashSet<u64> = tvol.element_ids.iter().copied().collect();
+        GSelection::Region(id) => {
+            if let Some(tregion) = topo.regions.get(id) {
+                // Highlight all boundary faces of this region's elements
+                let elem_ids: HashSet<u64> = tregion.element_ids.iter().copied().collect();
                 let vol_elements: Vec<_> = mesh.elements.iter().filter(|e| elem_ids.contains(&e.id)).collect();
 
                 let mut face_count: HashMap<Vec<u64>, (Vec<u64>, usize)> = HashMap::new();
@@ -348,7 +349,7 @@ pub fn extract_highlight(
                 (None, None)
             }
         }
-        TopoSelection::Vertex(id) => {
+        GSelection::Vertex(id) => {
             // For a vertex, we don't render surface/wireframe highlight.
             // Could render a point, but that uses a different pipeline.
             let _ = id;
