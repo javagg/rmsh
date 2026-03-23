@@ -243,6 +243,34 @@ impl eframe::App for RmshApp {
                 ui.checkbox(&mut self.config.show_gizmo, "Show Axes Gizmo");
                 ui.separator();
 
+                if ui.button("Isometric View").clicked() {
+                    if let Some(ref render_state) = self.render_state {
+                        let mut renderer = render_state.renderer.write();
+                        if let Some(scene) = renderer.callback_resources.get_mut::<Scene>() {
+                            scene.camera.set_isometric();
+                        }
+                    }
+                }
+
+                // Projection mode toggle
+                let proj_label = {
+                    if let Some(ref render_state) = self.render_state {
+                        let renderer = render_state.renderer.read();
+                        if let Some(scene) = renderer.callback_resources.get::<Scene>() {
+                            if scene.camera.orthographic { "Perspective" } else { "Orthographic" }
+                        } else { "Orthographic" }
+                    } else { "Orthographic" }
+                };
+                if ui.button(proj_label).clicked() {
+                    if let Some(ref render_state) = self.render_state {
+                        let mut renderer = render_state.renderer.write();
+                        if let Some(scene) = renderer.callback_resources.get_mut::<Scene>() {
+                            scene.camera.toggle_projection();
+                        }
+                    }
+                }
+                ui.separator();
+
                 ui.label("Surface Opacity");
                 ui.add(egui::Slider::new(&mut self.config.surface_opacity, 0.0..=1.0));
 
