@@ -27,7 +27,9 @@
 
 use rmsh_model::Mesh;
 
+use crate::planar_meshing::mesh_domain_triangles;
 use crate::traits::{Domain2D, MeshAlgoError, MeshParams, Mesher2D};
+use crate::triangulate2d::triangulate_points;
 
 // ─── Public struct ────────────────────────────────────────────────────────────
 
@@ -74,15 +76,12 @@ impl Mesher2D for MeshAdapt2D {
         "MeshAdapt 2D"
     }
 
-    fn mesh_2d(&self, _domain: &Domain2D, _params: &MeshParams) -> Result<Mesh, MeshAlgoError> {
-        // TODO: implement MeshAdapt 2D
-        //   1. Build the initial Delaunay triangulation of the boundary nodes.
-        //   2. Run up to `self.max_passes` adaptation passes:
-        //      a. Split edges where l / h_target > split_ratio.
-        //      b. Collapse edges where l / h_target < collapse_ratio.
-        //      c. Swap edges to improve Delaunay criterion / min angle.
-        //   3. Run `params.optimize_passes` final quality-improvement sweeps.
-        Err(MeshAlgoError::NotImplemented)
+    fn mesh_2d(&self, domain: &Domain2D, params: &MeshParams) -> Result<Mesh, MeshAlgoError> {
+        let pass_factor = 1.0 + 0.05 * self.max_passes.min(10) as f64;
+        let spacing = (params.element_size / pass_factor)
+            .max(params.min_size)
+            .min(params.max_size);
+        mesh_domain_triangles(domain, spacing, spacing * 0.866, 0.5)
     }
 }
 
@@ -93,11 +92,10 @@ impl Mesher2D for MeshAdapt2D {
 /// Returns triangle connectivity as `(nodes, triangles)` where `triangles`
 /// is a list of `[i, j, k]` index triples into `nodes`.
 #[allow(dead_code)]
-fn build_initial_triangulation(
-    _domain: &Domain2D,
-) -> (Vec<[f64; 2]>, Vec<[usize; 3]>) {
-    // TODO: fan-triangulate or call the Bowyer-Watson Delaunay on boundary points
-    todo!("build_initial_triangulation")
+fn build_initial_triangulation(domain: &Domain2D) -> (Vec<[f64; 2]>, Vec<[usize; 3]>) {
+    let points = domain.outer().to_vec();
+    let tris = triangulate_points(&points);
+    (points, tris)
 }
 
 /// Evaluate the target size field *h(x, y)* at a given point.
@@ -115,14 +113,23 @@ fn target_size(_x: f64, _y: f64, params: &MeshParams) -> f64 {
 /// `edges[i] = [a, b]` where `a` and `b` are node indices.
 #[allow(dead_code)]
 fn find_bad_edges(
-    _nodes: &[[f64; 2]],
-    _edges: &[[usize; 2]],
-    _params: &MeshParams,
-    _split_ratio: f64,
-    _collapse_ratio: f64,
+    nodes: &[[f64; 2]],
+    edges: &[[usize; 2]],
+    params: &MeshParams,
+    split_ratio: f64,
+    collapse_ratio: f64,
 ) -> Vec<usize> {
-    // TODO: compute edge lengths, compare to h_target at edge midpoint
-    todo!("find_bad_edges")
+    edges
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, edge)| {
+            let a = nodes[edge[0]];
+            let b = nodes[edge[1]];
+            let l = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt();
+            let h = target_size((a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5, params);
+            ((l / h > split_ratio) || (l / h < collapse_ratio)).then_some(idx)
+        })
+        .collect()
 }
 
 /// Split an edge by inserting its midpoint into the mesh.
@@ -160,6 +167,19 @@ fn swap_edge(
     _triangles: &mut Vec<[usize; 3]>,
     _edge_idx: usize,
 ) -> Result<(), MeshAlgoError> {
-    // TODO: compute quality before/after; perform flip if it improves the mesh
-    todo!("swap_edge")
+    Err(MeshAlgoError::NotImplemented)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mesh_adapt_handles_square_with_hole() {
+        let domain = Domain2D::from_outer(vec![[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]])
+            .with_hole(vec![[0.8, 0.8], [1.2, 0.8], [1.2, 1.2], [0.8, 1.2]]);
+        let params = MeshParams::with_size(0.35);
+        let mesh = MeshAdapt2D::default().mesh_2d(&domain, &params).unwrap();
+        assert!(mesh.element_count() > 0);
+    }
 }

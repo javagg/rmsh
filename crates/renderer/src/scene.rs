@@ -102,12 +102,21 @@ impl Scene {
             }],
         });
 
-        let mesh_pipeline = pipeline::create_mesh_pipeline(device, target_format, &bind_group_layout);
-        let wireframe_pipeline = pipeline::create_wireframe_pipeline(device, target_format, &bind_group_layout);
-        let point_pipeline = pipeline::create_point_pipeline(device, target_format, &bind_group_layout);
-        let gizmo_pipeline = pipeline::create_gizmo_pipeline(device, target_format, &bind_group_layout);
-        let highlight_surface_pipeline = pipeline::create_highlight_surface_pipeline(device, target_format, &bind_group_layout);
-        let highlight_wireframe_pipeline = pipeline::create_highlight_wireframe_pipeline(device, target_format, &bind_group_layout);
+        let mesh_pipeline =
+            pipeline::create_mesh_pipeline(device, target_format, &bind_group_layout);
+        let wireframe_pipeline =
+            pipeline::create_wireframe_pipeline(device, target_format, &bind_group_layout);
+        let point_pipeline =
+            pipeline::create_point_pipeline(device, target_format, &bind_group_layout);
+        let gizmo_pipeline =
+            pipeline::create_gizmo_pipeline(device, target_format, &bind_group_layout);
+        let highlight_surface_pipeline =
+            pipeline::create_highlight_surface_pipeline(device, target_format, &bind_group_layout);
+        let highlight_wireframe_pipeline = pipeline::create_highlight_wireframe_pipeline(
+            device,
+            target_format,
+            &bind_group_layout,
+        );
 
         let gizmo = AxisGizmo::new(device);
 
@@ -169,7 +178,11 @@ impl Scene {
             model: nalgebra::Matrix4::<f32>::identity().into(),
             camera_pos: [0.0, 0.0, 3.0, 1.0],
         };
-        queue.write_buffer(&self.gizmo_uniform_buffer, 0, bytemuck::bytes_of(&gizmo_uniforms));
+        queue.write_buffer(
+            &self.gizmo_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&gizmo_uniforms),
+        );
     }
 
     // --- Accessors for inline rendering from egui callback ---

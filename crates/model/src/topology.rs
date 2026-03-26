@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 /// A geometric vertex — a corner point where 3+ edges meet.
 /// Dimension: 0 (point)
 /// Belongs to a GModel (B-Rep topology).
-/// 
+///
 /// Relationship with mesh entities:
 /// - Contains a single node ID (typically Point1 element nodes, but can be any node)
 /// - Appears as an endpoint of GEdges
@@ -186,14 +186,8 @@ mod tests {
         let mut gmodel = GModel::default();
 
         // Add vertices (0D)
-        gmodel.vertices.push(GVertex {
-            id: 1,
-            node_id: 1,
-        });
-        gmodel.vertices.push(GVertex {
-            id: 2,
-            node_id: 2,
-        });
+        gmodel.vertices.push(GVertex { id: 1, node_id: 1 });
+        gmodel.vertices.push(GVertex { id: 2, node_id: 2 });
 
         // Add edges (1D)
         gmodel.edges.push(GEdge {
@@ -233,10 +227,7 @@ mod tests {
     fn dimension_containment_relationships() {
         // Verify typical containment patterns:
         // GVertex (0D) contains 1 node
-        let gvert = GVertex {
-            id: 1,
-            node_id: 5,
-        };
+        let gvert = GVertex { id: 1, node_id: 5 };
         assert_eq!(gvert.dimension(), 0);
         // Single node represents a 0D point
 
@@ -254,8 +245,8 @@ mod tests {
             id: 1,
             edge_ids: vec![1, 2, 3],
             mesh_faces: vec![
-                vec![10, 11, 12],      // Triangle3
-                vec![12, 13, 14, 15],  // Quad4
+                vec![10, 11, 12],     // Triangle3
+                vec![12, 13, 14, 15], // Quad4
             ],
         };
         assert_eq!(gface.dimension(), 2);
@@ -271,4 +262,3 @@ mod tests {
         assert!(!gregion.element_ids.is_empty());
     }
 }
-

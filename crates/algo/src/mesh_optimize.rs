@@ -229,13 +229,7 @@ fn should_swap_2d(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> bool {
 ///
 /// Returns the minimum dihedral angle in degrees (for `MinAngle` metric).
 #[allow(dead_code)]
-fn tet_quality(
-    a: [f64; 3],
-    b: [f64; 3],
-    c: [f64; 3],
-    d: [f64; 3],
-    metric: QualityMetric,
-) -> f64 {
+fn tet_quality(a: [f64; 3], b: [f64; 3], c: [f64; 3], d: [f64; 3], metric: QualityMetric) -> f64 {
     match metric {
         QualityMetric::MinAngle => min_dihedral_angle_tet(a, b, c, d),
         QualityMetric::RadiusEdgeRatio => {
@@ -257,9 +251,16 @@ fn tet_quality(
 #[allow(dead_code)]
 fn min_dihedral_angle_tet(a: [f64; 3], b: [f64; 3], c: [f64; 3], d: [f64; 3]) -> f64 {
     // 6 edges → 6 dihedral angles
-    let edges = [(a, b, c, d), (a, c, b, d), (a, d, b, c),
-                 (b, c, a, d), (b, d, a, c), (c, d, a, b)];
-    edges.iter()
+    let edges = [
+        (a, b, c, d),
+        (a, c, b, d),
+        (a, d, b, c),
+        (b, c, a, d),
+        (b, d, a, c),
+        (c, d, a, b),
+    ];
+    edges
+        .iter()
         .map(|&(p, q, r, s)| dihedral_angle(p, q, r, s))
         .fold(f64::MAX, f64::min)
 }

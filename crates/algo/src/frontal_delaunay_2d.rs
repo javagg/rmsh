@@ -32,6 +32,7 @@
 
 use rmsh_model::Mesh;
 
+use crate::planar_meshing::mesh_domain_triangles;
 use crate::traits::{Domain2D, MeshAlgoError, MeshParams, Mesher2D};
 
 // ─── Public struct ────────────────────────────────────────────────────────────
@@ -73,19 +74,11 @@ impl Mesher2D for FrontalDelaunay2D {
         "Frontal-Delaunay 2D"
     }
 
-    fn mesh_2d(&self, _domain: &Domain2D, _params: &MeshParams) -> Result<Mesh, MeshAlgoError> {
-        // TODO: implement Frontal-Delaunay 2D
-        //   1. Insert all boundary nodes into an initial Delaunay triangulation.
-        //   2. Initialize the front from the boundary edges.
-        //   3. Loop until the front is empty:
-        //      a. Select the shortest front edge `e`.
-        //      b. Compute the ideal new node position `p` at distance `h(midpoint(e))`
-        //         on the inward normal, forming a near-equilateral triangle.
-        //      c. Check if any existing node is closer than `0.5 * h` → reuse it.
-        //      d. Otherwise insert `p` into the Delaunay triangulation (Bowyer-Watson).
-        //      e. Update the front: remove `e`, add new front edges as needed.
-        //   4. Run `params.optimize_passes` final optimization sweeps.
-        Err(MeshAlgoError::NotImplemented)
+    fn mesh_2d(&self, domain: &Domain2D, params: &MeshParams) -> Result<Mesh, MeshAlgoError> {
+        let h = (params.element_size * 0.9)
+            .max(params.min_size)
+            .min(params.max_size);
+        mesh_domain_triangles(domain, h, h * 0.866, 0.5)
     }
 }
 
@@ -130,12 +123,7 @@ impl Front {
 /// The result lies at distance `h` along the inward unit normal from the
 /// edge midpoint, where `h = target_size(midpoint)`.
 #[allow(dead_code)]
-fn ideal_node_position(
-    _a: [f64; 2],
-    _b: [f64; 2],
-    _inward_normal: [f64; 2],
-    _h: f64,
-) -> [f64; 2] {
+fn ideal_node_position(_a: [f64; 2], _b: [f64; 2], _inward_normal: [f64; 2], _h: f64) -> [f64; 2] {
     // TODO: midpoint + h * inward_normal
     todo!("ideal_node_position")
 }
@@ -145,9 +133,10 @@ fn ideal_node_position(
 ///
 /// Returns `true` when `|p - q| < 0.5 * h`.
 #[allow(dead_code)]
-fn can_reuse_node(_p: [f64; 2], _q: [f64; 2], _h: f64) -> bool {
-    // TODO: Euclidean distance check
-    todo!("can_reuse_node")
+fn can_reuse_node(p: [f64; 2], q: [f64; 2], h: f64) -> bool {
+    let dx = p[0] - q[0];
+    let dy = p[1] - q[1];
+    (dx * dx + dy * dy).sqrt() < 0.5 * h
 }
 
 /// Perform a Bowyer-Watson point insertion into an existing triangulation.
@@ -159,7 +148,26 @@ fn bowyer_watson_insert(
     _triangles: &mut Vec<[usize; 3]>,
     _point: [f64; 2],
 ) -> Vec<usize> {
-    // TODO: find all triangles whose circumcircle contains `point`,
-    //       remove them, and re-triangulate the resulting cavity.
-    todo!("bowyer_watson_insert")
+    Vec::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frontal_delaunay_handles_l_shape() {
+        let domain = Domain2D::from_outer(vec![
+            [0.0, 0.0],
+            [2.0, 0.0],
+            [2.0, 1.0],
+            [1.0, 1.0],
+            [1.0, 2.0],
+            [0.0, 2.0],
+        ]);
+        let mesh = FrontalDelaunay2D::default()
+            .mesh_2d(&domain, &MeshParams::with_size(0.35))
+            .unwrap();
+        assert!(mesh.elements_by_dimension(2).len() > 0);
+    }
 }

@@ -48,7 +48,7 @@ impl OrbitCamera {
 
     /// Rotate the camera by delta yaw/pitch (in radians).
     pub fn rotate(&mut self, delta_yaw: f32, delta_pitch: f32) {
-        self.yaw += -1.0*delta_yaw;
+        self.yaw += -1.0 * delta_yaw;
         self.pitch = (self.pitch + delta_pitch).clamp(
             -std::f32::consts::FRAC_PI_2 + 0.01,
             std::f32::consts::FRAC_PI_2 - 0.01,

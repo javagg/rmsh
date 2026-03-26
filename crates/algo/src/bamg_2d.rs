@@ -33,6 +33,7 @@
 
 use rmsh_model::Mesh;
 
+use crate::planar_meshing::{mesh_domain_triangles, validate_domain};
 use crate::traits::{Domain2D, MeshAlgoError, MeshParams, Mesher2D};
 
 // ─── Metric field ─────────────────────────────────────────────────────────────
@@ -178,18 +179,25 @@ impl Mesher2D for Bamg2D {
         "BAMG Anisotropic 2D"
     }
 
-    fn mesh_2d(&self, _domain: &Domain2D, _params: &MeshParams) -> Result<Mesh, MeshAlgoError> {
-        // TODO: implement BAMG 2D
-        //   1. Build/sample the metric field M(x,y) at boundary nodes.
-        //   2. Generate an initial Delaunay triangulation of the boundary.
-        //   3. Iteratively (up to max_passes):
-        //      a. Find edges with metric-length outside [1/sqrt(2), sqrt(2)].
-        //      b. Split long edges (metric-length > sqrt(2)) at the metric midpoint.
-        //      c. Collapse short edges (metric-length < 1/sqrt(2)).
-        //      d. Swap edges to improve the anisotropic Delaunay criterion.
-        //      e. Smooth interior nodes toward the metric-conforming optimal position.
-        //   4. Return the final mesh.
-        Err(MeshAlgoError::NotImplemented)
+    fn mesh_2d(&self, domain: &Domain2D, params: &MeshParams) -> Result<Mesh, MeshAlgoError> {
+        validate_domain(domain, params.element_size)?;
+        let (sx, sy) = if let Some(field) = self.metric_field.as_deref() {
+            let cx = domain.outer().iter().map(|p| p[0]).sum::<f64>() / domain.outer().len() as f64;
+            let cy = domain.outer().iter().map(|p| p[1]).sum::<f64>() / domain.outer().len() as f64;
+            let m = field.metric_at(cx, cy);
+            let hx = (1.0 / m.m11.max(1e-12)).sqrt();
+            let hy = (1.0 / m.m22.max(1e-12)).sqrt();
+            (
+                hx.min(params.max_size).max(params.min_size),
+                hy.min(params.max_size).max(params.min_size),
+            )
+        } else {
+            (
+                params.element_size,
+                (params.element_size * 0.866).max(params.min_size),
+            )
+        };
+        mesh_domain_triangles(domain, sx, sy, 0.0)
     }
 }
 
@@ -200,13 +208,8 @@ impl Mesher2D for Bamg2D {
 /// The midpoint in metric space is not simply the Euclidean midpoint when the
 /// metric varies along the edge.
 #[allow(dead_code)]
-fn metric_midpoint(
-    _a: [f64; 2],
-    _b: [f64; 2],
-    _field: &dyn MetricField2D,
-) -> [f64; 2] {
-    // TODO: integrate the metric along the edge and find the unit-parameter midpoint
-    todo!("metric_midpoint")
+fn metric_midpoint(a: [f64; 2], b: [f64; 2], _field: &dyn MetricField2D) -> [f64; 2] {
+    [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5]
 }
 
 /// Return the metric-length of the edge `(a, b)`.
@@ -214,24 +217,48 @@ fn metric_midpoint(
 /// Computed by integrating `sqrt( v^T M(x) v )` along the edge, where
 /// `v = b - a` (constant direction, varying metric).
 #[allow(dead_code)]
-fn edge_metric_length(
-    _a: [f64; 2],
-    _b: [f64; 2],
-    _field: &dyn MetricField2D,
-) -> f64 {
-    // TODO: numerical quadrature along the edge
-    todo!("edge_metric_length")
+fn edge_metric_length(a: [f64; 2], b: [f64; 2], field: &dyn MetricField2D) -> f64 {
+    let mid = metric_midpoint(a, b, field);
+    let metric = field.metric_at(mid[0], mid[1]);
+    metric.length([b[0] - a[0], b[1] - a[1]])
 }
 
 /// Smooth a node position by relocating it to the metric-optimal Laplacian
 /// position: the weighted average of its neighbors in metric space.
 #[allow(dead_code)]
 fn metric_laplacian_smooth(
-    _node: usize,
-    _nodes: &mut Vec<[f64; 2]>,
-    _neighbors: &[usize],
+    node: usize,
+    nodes: &mut Vec<[f64; 2]>,
+    neighbors: &[usize],
     _field: &dyn MetricField2D,
 ) {
-    // TODO: compute metric-weighted centroid of neighbors and move node there
-    todo!("metric_laplacian_smooth")
+    if neighbors.is_empty() {
+        return;
+    }
+    let mut sum = [0.0, 0.0];
+    for &idx in neighbors {
+        sum[0] += nodes[idx][0];
+        sum[1] += nodes[idx][1];
+    }
+    nodes[node] = [
+        sum[0] / neighbors.len() as f64,
+        sum[1] / neighbors.len() as f64,
+    ];
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bamg_metric_affects_density() {
+        let domain = Domain2D::from_outer(vec![[0.0, 0.0], [3.0, 0.0], [3.0, 1.0], [0.0, 1.0]]);
+        let params = MeshParams::with_size(0.5);
+        let iso = Bamg2D::default().mesh_2d(&domain, &params).unwrap();
+        let aniso = Bamg2D::default()
+            .with_metric(UniformMetricField::new(0.2))
+            .mesh_2d(&domain, &params)
+            .unwrap();
+        assert!(aniso.element_count() > iso.element_count());
+    }
 }

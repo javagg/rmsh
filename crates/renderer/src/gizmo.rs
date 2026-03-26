@@ -39,9 +39,24 @@ impl AxisGizmo {
         let mut vertices = Vec::new();
 
         // Axes
-        push_segment(&mut vertices, [0.0, 0.0, 0.0], [axis_length, 0.0, 0.0], x_color);
-        push_segment(&mut vertices, [0.0, 0.0, 0.0], [0.0, axis_length, 0.0], y_color);
-        push_segment(&mut vertices, [0.0, 0.0, 0.0], [0.0, 0.0, axis_length], z_color);
+        push_segment(
+            &mut vertices,
+            [0.0, 0.0, 0.0],
+            [axis_length, 0.0, 0.0],
+            x_color,
+        );
+        push_segment(
+            &mut vertices,
+            [0.0, 0.0, 0.0],
+            [0.0, axis_length, 0.0],
+            y_color,
+        );
+        push_segment(
+            &mut vertices,
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, axis_length],
+            z_color,
+        );
 
         // X glyph near +X endpoint (drawn in YZ plane)
         let x0 = axis_length + letter_gap;
@@ -63,12 +78,7 @@ impl AxisGizmo {
             [0.0, y0, 0.0],
             y_color,
         );
-        push_segment(
-            &mut vertices,
-            [0.0, y0, 0.0],
-            [0.0, y0 - hs, 0.0],
-            y_color,
-        );
+        push_segment(&mut vertices, [0.0, y0, 0.0], [0.0, y0 - hs, 0.0], y_color);
 
         // Z glyph near +Z endpoint (drawn in XY plane)
         let z0 = axis_length + letter_gap;

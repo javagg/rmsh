@@ -156,9 +156,7 @@ fn laplacian_pass(
         };
 
         let new_pos = match variant {
-            LaplacianVariant::Uniform => {
-                uniform_centroid(id, neighbors, mesh)?
-            }
+            LaplacianVariant::Uniform => uniform_centroid(id, neighbors, mesh)?,
             LaplacianVariant::Cotangent => {
                 // TODO: cotangent-weighted centroid
                 return Err(MeshAlgoError::NotImplemented);
@@ -193,17 +191,14 @@ fn laplacian_pass(
 }
 
 /// Compute the unweighted centroid of a node's neighbours.
-fn uniform_centroid(
-    _id: u64,
-    neighbors: &[u64],
-    mesh: &Mesh,
-) -> Result<[f64; 3], MeshAlgoError> {
+fn uniform_centroid(_id: u64, neighbors: &[u64], mesh: &Mesh) -> Result<[f64; 3], MeshAlgoError> {
     let n = neighbors.len() as f64;
     let mut sum = [0.0_f64; 3];
     for &nb_id in neighbors {
-        let nb = mesh.nodes.get(&nb_id).ok_or_else(|| {
-            MeshAlgoError::Generation(format!("missing neighbour node {nb_id}"))
-        })?;
+        let nb = mesh
+            .nodes
+            .get(&nb_id)
+            .ok_or_else(|| MeshAlgoError::Generation(format!("missing neighbour node {nb_id}")))?;
         sum[0] += nb.position.x;
         sum[1] += nb.position.y;
         sum[2] += nb.position.z;

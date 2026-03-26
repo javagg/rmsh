@@ -65,7 +65,10 @@ impl Mesh {
 
     /// Filter elements by topological dimension.
     pub fn elements_by_dimension(&self, dim: u8) -> Vec<&Element> {
-        self.elements.iter().filter(|e| e.dimension() == dim).collect()
+        self.elements
+            .iter()
+            .filter(|e| e.dimension() == dim)
+            .collect()
     }
 
     /// Get node count.

@@ -43,6 +43,9 @@
 
 use rmsh_model::Mesh;
 
+use crate::planar_meshing::{
+    is_axis_aligned_rectangle, mesh_domain_triangles, structured_quad_mesh_rectangle,
+};
 use crate::traits::{Domain2D, MeshAlgoError, MeshParams, Mesher2D};
 
 // ─── Strategy ────────────────────────────────────────────────────────────────
@@ -109,24 +112,26 @@ impl Mesher2D for QuadPaving2D {
         "Quad Paving 2D"
     }
 
-    fn mesh_2d(&self, _domain: &Domain2D, _params: &MeshParams) -> Result<Mesh, MeshAlgoError> {
-        // TODO: implement quad paving
-        //
-        // PackingOfParallelograms path:
-        //   1. Generate an initial triangle mesh (e.g., via FrontalDelaunay2D).
-        //   2. Solve the Laplace equation on the dual mesh to obtain a smooth
-        //      cross field (4-RoSy field): find θ(x,y) minimising ∫|∇θ|².
-        //   3. Trace streamlines in the two cross-field directions from seed points.
-        //   4. Identify quad patches enclosed by streamline pairs.
-        //   5. Fill each patch with a structured quad grid respecting h(x,y).
-        //   6. Handle singularities (±90° rotation of cross) with a triangle.
-        //
-        // Recombine path:
-        //   1. Generate a triangle mesh.
-        //   2. Use Blossom-Quad (max-weight matching) to pair adjacent triangles
-        //      into quads, maximising element quality.
-        //   3. Smooth the resulting quad mesh.
-        Err(MeshAlgoError::NotImplemented)
+    fn mesh_2d(&self, domain: &Domain2D, params: &MeshParams) -> Result<Mesh, MeshAlgoError> {
+        if domain.boundaries.len() == 1 {
+            if let Some((min, max)) = is_axis_aligned_rectangle(domain.outer()) {
+                return Ok(structured_quad_mesh_rectangle(
+                    min,
+                    max,
+                    params.element_size,
+                ));
+            }
+        }
+
+        let tri_mesh =
+            mesh_domain_triangles(domain, params.element_size, params.element_size, 0.0)?;
+        if self.require_pure_quad {
+            return Err(MeshAlgoError::Generation(
+                "pure quad output currently requires an axis-aligned rectangular domain"
+                    .to_string(),
+            ));
+        }
+        Ok(tri_mesh)
     }
 }
 
@@ -188,10 +193,33 @@ fn trace_streamline(
 /// Returns `None` if the shared edge does not produce a convex quadrilateral.
 #[allow(dead_code)]
 fn recombine_triangle_pair(
-    _tri_a: [usize; 3],
-    _tri_b: [usize; 3],
+    tri_a: [usize; 3],
+    tri_b: [usize; 3],
     _nodes: &[[f64; 2]],
 ) -> Option<[usize; 4]> {
-    // TODO: identify the shared edge, form the quad, check convexity
-    todo!("recombine_triangle_pair")
+    let shared: Vec<_> = tri_a.into_iter().filter(|a| tri_b.contains(a)).collect();
+    if shared.len() != 2 {
+        return None;
+    }
+    let a_only = tri_a.into_iter().find(|n| !shared.contains(n))?;
+    let b_only = tri_b.into_iter().find(|n| !shared.contains(n))?;
+    Some([a_only, shared[0], b_only, shared[1]])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quad_paving_rectangle_produces_quads() {
+        let domain = Domain2D::from_outer(vec![[0.0, 0.0], [2.0, 0.0], [2.0, 1.0], [0.0, 1.0]]);
+        let mesh = QuadPaving2D::default()
+            .mesh_2d(&domain, &MeshParams::with_size(0.5))
+            .unwrap();
+        assert!(
+            mesh.elements
+                .iter()
+                .all(|e| e.etype == rmsh_model::ElementType::Quad4)
+        );
+    }
 }

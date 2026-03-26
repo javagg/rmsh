@@ -131,7 +131,13 @@ fn refine_bad_tetrahedra(
         return Ok(mesh);
     }
 
-    let mut next_node_id = mesh.nodes.keys().copied().max().unwrap_or(0).saturating_add(1);
+    let mut next_node_id = mesh
+        .nodes
+        .keys()
+        .copied()
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
     let mut next_elem_id = mesh
         .elements
         .iter()
@@ -167,19 +173,40 @@ fn refine_bad_tetrahedra(
         let new_node_id = next_node_id;
         next_node_id = next_node_id.saturating_add(1);
 
-        mesh.add_node(Node::new(new_node_id, centroid[0], centroid[1], centroid[2]));
+        mesh.add_node(Node::new(
+            new_node_id,
+            centroid[0],
+            centroid[1],
+            centroid[2],
+        ));
 
         // Replace one bad tetrahedron by four children sharing the inserted node.
         let [a, b, c, d] = worst_nodes;
 
         mesh.elements.swap_remove(worst_idx);
-        mesh.add_element(Element::new(next_elem_id, ElementType::Tetrahedron4, vec![a, b, c, new_node_id]));
+        mesh.add_element(Element::new(
+            next_elem_id,
+            ElementType::Tetrahedron4,
+            vec![a, b, c, new_node_id],
+        ));
         next_elem_id = next_elem_id.saturating_add(1);
-        mesh.add_element(Element::new(next_elem_id, ElementType::Tetrahedron4, vec![a, b, d, new_node_id]));
+        mesh.add_element(Element::new(
+            next_elem_id,
+            ElementType::Tetrahedron4,
+            vec![a, b, d, new_node_id],
+        ));
         next_elem_id = next_elem_id.saturating_add(1);
-        mesh.add_element(Element::new(next_elem_id, ElementType::Tetrahedron4, vec![a, c, d, new_node_id]));
+        mesh.add_element(Element::new(
+            next_elem_id,
+            ElementType::Tetrahedron4,
+            vec![a, c, d, new_node_id],
+        ));
         next_elem_id = next_elem_id.saturating_add(1);
-        mesh.add_element(Element::new(next_elem_id, ElementType::Tetrahedron4, vec![b, c, d, new_node_id]));
+        mesh.add_element(Element::new(
+            next_elem_id,
+            ElementType::Tetrahedron4,
+            vec![b, c, d, new_node_id],
+        ));
         next_elem_id = next_elem_id.saturating_add(1);
     }
 
@@ -219,7 +246,9 @@ fn find_worst_tetrahedron(
 
 fn tetra_centroid_from_mesh(mesh: &Mesh, tet: &[u64]) -> Result<[f64; 3], MeshAlgoError> {
     if tet.len() != 4 {
-        return Err(MeshAlgoError::Generation("tetrahedron must have 4 nodes".to_string()));
+        return Err(MeshAlgoError::Generation(
+            "tetrahedron must have 4 nodes".to_string(),
+        ));
     }
     let mut sum = [0.0_f64; 3];
     for &nid in tet {
@@ -236,7 +265,9 @@ fn tetra_centroid_from_mesh(mesh: &Mesh, tet: &[u64]) -> Result<[f64; 3], MeshAl
 
 fn tetra_radius_edge_ratio_from_mesh(mesh: &Mesh, tet: &[u64]) -> Result<f64, MeshAlgoError> {
     if tet.len() != 4 {
-        return Err(MeshAlgoError::Generation("tetrahedron must have 4 nodes".to_string()));
+        return Err(MeshAlgoError::Generation(
+            "tetrahedron must have 4 nodes".to_string(),
+        ));
     }
     let mut pts = [[0.0_f64; 3]; 4];
     for (i, &nid) in tet.iter().enumerate() {
@@ -251,7 +282,9 @@ fn tetra_radius_edge_ratio_from_mesh(mesh: &Mesh, tet: &[u64]) -> Result<f64, Me
 
 fn tetra_max_edge_length_from_mesh(mesh: &Mesh, tet: &[u64]) -> Result<f64, MeshAlgoError> {
     if tet.len() != 4 {
-        return Err(MeshAlgoError::Generation("tetrahedron must have 4 nodes".to_string()));
+        return Err(MeshAlgoError::Generation(
+            "tetrahedron must have 4 nodes".to_string(),
+        ));
     }
     let mut pts = [[0.0_f64; 3]; 4];
     for (i, &nid) in tet.iter().enumerate() {
@@ -314,15 +347,27 @@ fn circumsphere(a: [f64; 3], b: [f64; 3], c: [f64; 3], d: [f64; 3]) -> ([f64; 3]
     // This yields A * x = rhs with 3 equations.
     let rows = [
         (
-            [2.0 * (b[0] - a[0]), 2.0 * (b[1] - a[1]), 2.0 * (b[2] - a[2])],
+            [
+                2.0 * (b[0] - a[0]),
+                2.0 * (b[1] - a[1]),
+                2.0 * (b[2] - a[2]),
+            ],
             b[0] * b[0] + b[1] * b[1] + b[2] * b[2] - (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]),
         ),
         (
-            [2.0 * (c[0] - a[0]), 2.0 * (c[1] - a[1]), 2.0 * (c[2] - a[2])],
+            [
+                2.0 * (c[0] - a[0]),
+                2.0 * (c[1] - a[1]),
+                2.0 * (c[2] - a[2]),
+            ],
             c[0] * c[0] + c[1] * c[1] + c[2] * c[2] - (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]),
         ),
         (
-            [2.0 * (d[0] - a[0]), 2.0 * (d[1] - a[1]), 2.0 * (d[2] - a[2])],
+            [
+                2.0 * (d[0] - a[0]),
+                2.0 * (d[1] - a[1]),
+                2.0 * (d[2] - a[2]),
+            ],
             d[0] * d[0] + d[1] * d[1] + d[2] * d[2] - (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]),
         ),
     ];
@@ -349,13 +394,7 @@ fn circumsphere(a: [f64; 3], b: [f64; 3], c: [f64; 3], d: [f64; 3]) -> ([f64; 3]
 /// Uses the in-sphere predicate.  Returns `> 0` if inside, `< 0` if outside,
 /// `0` on the sphere (degenerate).
 #[allow(dead_code)]
-fn in_sphere_test(
-    a: [f64; 3],
-    b: [f64; 3],
-    c: [f64; 3],
-    d: [f64; 3],
-    p: [f64; 3],
-) -> f64 {
+fn in_sphere_test(a: [f64; 3], b: [f64; 3], c: [f64; 3], d: [f64; 3], p: [f64; 3]) -> f64 {
     // Sign convention here is "radius - distance":
     // > 0 => inside, 0 => on sphere, < 0 => outside.
     let (center, radius) = circumsphere(a, b, c, d);
@@ -526,8 +565,12 @@ mod tests {
         fine.max_size = 0.3;
         fine.optimize_passes = 2;
 
-        let out_coarse = algo.mesh_3d(&mesh, &coarse).expect("coarse meshing should succeed");
-        let out_fine = algo.mesh_3d(&mesh, &fine).expect("fine meshing should succeed");
+        let out_coarse = algo
+            .mesh_3d(&mesh, &coarse)
+            .expect("coarse meshing should succeed");
+        let out_fine = algo
+            .mesh_3d(&mesh, &fine)
+            .expect("fine meshing should succeed");
 
         let coarse_tets = out_coarse.elements_by_dimension(3).len();
         let fine_tets = out_fine.elements_by_dimension(3).len();

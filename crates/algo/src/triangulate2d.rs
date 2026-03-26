@@ -42,9 +42,7 @@ impl Polygon2D {
         for i in 0..n {
             let (xi, yi) = (self.vertices[i][0], self.vertices[i][1]);
             let (xj, yj) = (self.vertices[j][0], self.vertices[j][1]);
-            if ((yi > py) != (yj > py))
-                && (px < (xj - xi) * (py - yi) / (yj - yi) + xi)
-            {
+            if ((yi > py) != (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi) {
                 inside = !inside;
             }
             j = i;
@@ -112,9 +110,7 @@ pub fn triangulate_points(pts: &[[f64; 2]]) -> Vec<[usize; 3]> {
         // Find all triangles whose circumcircle contains p
         let bad: Vec<[usize; 3]> = triangles
             .iter()
-            .filter(|&&tri| {
-                circumcircle_contains(all[tri[0]], all[tri[1]], all[tri[2]], p)
-            })
+            .filter(|&&tri| circumcircle_contains(all[tri[0]], all[tri[1]], all[tri[2]], p))
             .copied()
             .collect();
 
@@ -124,9 +120,9 @@ pub fn triangulate_points(pts: &[[f64; 2]]) -> Vec<[usize; 3]> {
         for &tri in &bad {
             let edges = [[tri[0], tri[1]], [tri[1], tri[2]], [tri[2], tri[0]]];
             for edge in edges {
-                let shared = bad.iter().any(|&other| {
-                    other != tri && tri_has_edge(other, edge[0], edge[1])
-                });
+                let shared = bad
+                    .iter()
+                    .any(|&other| other != tri && tri_has_edge(other, edge[0], edge[1]));
                 if !shared {
                     boundary.push(edge);
                 }
@@ -164,7 +160,9 @@ pub fn mesh_polygon(polygon: &Polygon2D, mesh_size: f64) -> Result<Mesh, MeshErr
         ));
     }
     if mesh_size <= 0.0 {
-        return Err(MeshError::Generation("mesh_size must be positive".to_string()));
+        return Err(MeshError::Generation(
+            "mesh_size must be positive".to_string(),
+        ));
     }
 
     let (bb_min, bb_max) = polygon.bounding_box();
@@ -179,10 +177,7 @@ pub fn mesh_polygon(polygon: &Polygon2D, mesh_size: f64) -> Result<Mesh, MeshErr
         let nseg = ((len / mesh_size).ceil() as usize).max(1);
         for k in 0..nseg {
             let t = k as f64 / nseg as f64;
-            points.push([
-                a[0] + t * (b[0] - a[0]),
-                a[1] + t * (b[1] - a[1]),
-            ]);
+            points.push([a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])]);
         }
     }
 
@@ -273,9 +268,7 @@ fn circumcircle_contains(a: [f64; 2], b: [f64; 2], c: [f64; 2], p: [f64; 2]) -> 
     let b2 = bx * bx + by * by;
     let c2 = cx * cx + cy * cy;
 
-    let det = ax * (by * c2 - cy * b2)
-            - ay * (bx * c2 - cx * b2)
-            + a2 * (bx * cy - by * cx);
+    let det = ax * (by * c2 - cy * b2) - ay * (bx * c2 - cx * b2) + a2 * (bx * cy - by * cx);
 
     // `det > 0` only means "inside" for CCW triangles.
     // Multiply by the orientation sign to handle CW triangles too.
@@ -330,12 +323,7 @@ mod tests {
 
     #[test]
     fn mesh_unit_square() {
-        let poly = Polygon2D::new(vec![
-            [0.0, 0.0],
-            [1.0, 0.0],
-            [1.0, 1.0],
-            [0.0, 1.0],
-        ]);
+        let poly = Polygon2D::new(vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
         let mesh = mesh_polygon(&poly, 0.25).expect("meshing should succeed");
         assert!(mesh.node_count() > 0);
         assert!(mesh.element_count() > 0);
@@ -373,17 +361,15 @@ mod tests {
         assert!(mesh_polygon(&poly, 0.5).is_err(), "< 3 vertices must fail");
 
         let poly2 = Polygon2D::new(vec![[0.0, 0.0], [1.0, 0.0], [0.5, 1.0]]);
-        assert!(mesh_polygon(&poly2, -1.0).is_err(), "negative size must fail");
+        assert!(
+            mesh_polygon(&poly2, -1.0).is_err(),
+            "negative size must fail"
+        );
     }
 
     #[test]
     fn point_in_polygon() {
-        let poly = Polygon2D::new(vec![
-            [0.0, 0.0],
-            [1.0, 0.0],
-            [1.0, 1.0],
-            [0.0, 1.0],
-        ]);
+        let poly = Polygon2D::new(vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
         assert!(poly.contains([0.5, 0.5]));
         assert!(!poly.contains([1.5, 0.5]));
         assert!(!poly.contains([-0.1, 0.5]));

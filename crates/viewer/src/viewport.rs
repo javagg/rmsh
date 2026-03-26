@@ -56,7 +56,8 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                 render_pass.set_pipeline(scene.mesh_pipeline());
                 render_pass.set_bind_group(0, scene.uniform_bind_group(), &[]);
                 render_pass.set_vertex_buffer(0, surface.vertex_buffer.slice(..));
-                render_pass.set_index_buffer(surface.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass
+                    .set_index_buffer(surface.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 render_pass.draw_indexed(0..surface.index_count, 0, 0..1);
             }
         }
@@ -67,7 +68,8 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                 render_pass.set_pipeline(scene.wireframe_pipeline());
                 render_pass.set_bind_group(0, scene.uniform_bind_group(), &[]);
                 render_pass.set_vertex_buffer(0, wireframe.vertex_buffer.slice(..));
-                render_pass.set_index_buffer(wireframe.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass
+                    .set_index_buffer(wireframe.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 render_pass.draw_indexed(0..wireframe.index_count, 0, 0..1);
             }
         }
@@ -88,14 +90,16 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                 render_pass.set_pipeline(scene.highlight_surface_pipeline());
                 render_pass.set_bind_group(0, scene.uniform_bind_group(), &[]);
                 render_pass.set_vertex_buffer(0, surface.vertex_buffer.slice(..));
-                render_pass.set_index_buffer(surface.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass
+                    .set_index_buffer(surface.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 render_pass.draw_indexed(0..surface.index_count, 0, 0..1);
             }
             if let Some(ref wireframe) = hl.wireframe {
                 render_pass.set_pipeline(scene.highlight_wireframe_pipeline());
                 render_pass.set_bind_group(0, scene.uniform_bind_group(), &[]);
                 render_pass.set_vertex_buffer(0, wireframe.vertex_buffer.slice(..));
-                render_pass.set_index_buffer(wireframe.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass
+                    .set_index_buffer(wireframe.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 render_pass.draw_indexed(0..wireframe.index_count, 0, 0..1);
             }
         }
@@ -104,9 +108,18 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
         if scene.config.show_gizmo {
             let gizmo_size = 96u32;
             let margin = 10u32;
-            let gizmo_x = viewport.left_px as f32 + width as f32 - gizmo_size as f32 - margin as f32;
-            let gizmo_y = viewport.top_px as f32 + height as f32 - gizmo_size as f32 - margin as f32;
-            render_pass.set_viewport(gizmo_x, gizmo_y, gizmo_size as f32, gizmo_size as f32, 0.0, 1.0);
+            let gizmo_x =
+                viewport.left_px as f32 + width as f32 - gizmo_size as f32 - margin as f32;
+            let gizmo_y =
+                viewport.top_px as f32 + height as f32 - gizmo_size as f32 - margin as f32;
+            render_pass.set_viewport(
+                gizmo_x,
+                gizmo_y,
+                gizmo_size as f32,
+                gizmo_size as f32,
+                0.0,
+                1.0,
+            );
             render_pass.set_pipeline(scene.gizmo_pipeline());
             render_pass.set_bind_group(0, scene.gizmo_bind_group(), &[]);
             render_pass.set_vertex_buffer(0, scene.gizmo_vertex_buffer().slice(..));

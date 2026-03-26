@@ -6,10 +6,10 @@ pub mod topology;
 pub use element::{Element, ElementType};
 pub use mesh::Mesh;
 pub use node::Node;
-pub use topology::{GModel, GVertex, GEdge, GFace, GRegion, GSelection};
+pub use topology::{GEdge, GFace, GModel, GRegion, GSelection, GVertex};
 
 // Backward compatibility aliases
-pub use topology::{Topology, TopoVertex, TopoEdge, TopoFace, TopoVolume, TopoSelection};
+pub use topology::{TopoEdge, TopoFace, TopoSelection, TopoVertex, TopoVolume, Topology};
 
 /// 3D point type alias
 pub type Point3 = nalgebra::Point3<f64>;

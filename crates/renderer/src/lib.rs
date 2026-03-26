@@ -6,4 +6,4 @@ pub mod scene;
 pub mod uniform;
 
 pub use camera::OrbitCamera;
-pub use scene::{Scene, RenderConfig};
+pub use scene::{RenderConfig, Scene};

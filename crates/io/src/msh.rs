@@ -63,10 +63,7 @@ pub fn write_msh_v2<W: Write>(writer: &mut W, mesh: &Mesh) -> Result<(), MshErro
         writeln!(
             writer,
             "{} {} {} {}",
-            node.id,
-            node.position.x,
-            node.position.y,
-            node.position.z
+            node.id, node.position.x, node.position.y, node.position.z
         )?;
     }
     writeln!(writer, "$EndNodes")?;
@@ -132,9 +129,7 @@ pub fn write_msh_v4<W: Write>(writer: &mut W, mesh: &Mesh) -> Result<(), MshErro
             writeln!(
                 writer,
                 "{} {} {}",
-                node.position.x,
-                node.position.y,
-                node.position.z
+                node.position.x, node.position.y, node.position.z
             )?;
         }
     }
@@ -192,16 +187,17 @@ pub fn parse_msh<R: BufRead>(reader: R) -> Result<Mesh, MshError> {
     let mut line_num: usize = 0;
     let mut version = MshVersion::V4;
 
-    let next_line = |lines: &mut std::io::Lines<R>, line_num: &mut usize| -> Result<String, MshError> {
-        *line_num += 1;
-        lines
-            .next()
-            .ok_or_else(|| MshError::Parse {
-                line: *line_num,
-                message: "Unexpected end of file".into(),
-            })?
-            .map_err(MshError::Io)
-    };
+    let next_line =
+        |lines: &mut std::io::Lines<R>, line_num: &mut usize| -> Result<String, MshError> {
+            *line_num += 1;
+            lines
+                .next()
+                .ok_or_else(|| MshError::Parse {
+                    line: *line_num,
+                    message: "Unexpected end of file".into(),
+                })?
+                .map_err(MshError::Io)
+        };
 
     while let Some(line_result) = lines.next() {
         line_num += 1;
@@ -642,7 +638,8 @@ mod tests {
         actual_elements.sort_by_key(|element| element.id);
         let mut expected_elements: Vec<_> = expected.elements.iter().collect();
         expected_elements.sort_by_key(|element| element.id);
-        for (actual_element, expected_element) in actual_elements.into_iter().zip(expected_elements) {
+        for (actual_element, expected_element) in actual_elements.into_iter().zip(expected_elements)
+        {
             assert_eq!(actual_element.id, expected_element.id);
             assert_eq!(actual_element.etype, expected_element.etype);
             assert_eq!(actual_element.node_ids, expected_element.node_ids);
@@ -675,7 +672,10 @@ $EndElements
         let mesh = parse_msh(Cursor::new(msh_data.as_bytes())).unwrap();
         assert_eq!(mesh.node_count(), 4);
         assert_eq!(mesh.element_count(), 1);
-        assert_eq!(mesh.elements[0].etype, rmsh_model::ElementType::Tetrahedron4);
+        assert_eq!(
+            mesh.elements[0].etype,
+            rmsh_model::ElementType::Tetrahedron4
+        );
     }
 
     #[test]
@@ -700,7 +700,10 @@ $EndElements
         assert_eq!(mesh.node_count(), 4);
         assert_eq!(mesh.element_count(), 2);
         assert_eq!(mesh.elements[0].etype, rmsh_model::ElementType::Triangle3);
-        assert_eq!(mesh.elements[1].etype, rmsh_model::ElementType::Tetrahedron4);
+        assert_eq!(
+            mesh.elements[1].etype,
+            rmsh_model::ElementType::Tetrahedron4
+        );
         assert_eq!(mesh.elements[0].node_ids, vec![1, 2, 3]);
         assert_eq!(mesh.elements[1].node_ids, vec![1, 2, 3, 4]);
     }

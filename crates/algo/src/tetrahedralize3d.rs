@@ -92,10 +92,9 @@ pub fn tetrahedralize_closed_surface(mesh: &Mesh) -> Result<Mesh, Mesh3DError> {
 
     let mut out = Mesh::new();
     for nid in &boundary_nodes {
-        let node = mesh
-            .nodes
-            .get(nid)
-            .ok_or_else(|| Mesh3DError::Generation(format!("Node {} missing in source mesh", nid)))?;
+        let node = mesh.nodes.get(nid).ok_or_else(|| {
+            Mesh3DError::Generation(format!("Node {} missing in source mesh", nid))
+        })?;
         out.add_node(node.clone());
     }
     out.add_node(Node::new(centroid_id, centroid.x, centroid.y, centroid.z));
@@ -400,7 +399,8 @@ mod tests {
         // Invalid Tet4: only 3 node ids -> face local indexing should fail.
         mesh.add_element(Element::new(1, ElementType::Tetrahedron4, vec![1, 2, 3]));
 
-        let err = collect_boundary_polygons(&mesh).expect_err("invalid face connectivity should fail");
+        let err =
+            collect_boundary_polygons(&mesh).expect_err("invalid face connectivity should fail");
         match err {
             Mesh3DError::Generation(msg) => {
                 assert!(msg.contains("connectivity is inconsistent"));

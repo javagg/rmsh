@@ -12,7 +12,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use rmsh_model::{Mesh, Topology, TopoEdge, TopoFace, TopoVertex, TopoVolume};
+use rmsh_model::{Mesh, TopoEdge, TopoFace, TopoVertex, TopoVolume, Topology};
 
 /// A mesh face — a boundary polygon with its normal.
 #[derive(Debug, Clone)]
@@ -179,7 +179,10 @@ pub fn classify(mesh: &Mesh, angle_threshold_deg: f64) -> Topology {
         // A vertex where != 2 edges meet, or where it's a real corner
         if eids.len() != 2 {
             let vid = topo_vertices.len();
-            topo_vertices.push(TopoVertex { id: vid, node_id: nid });
+            topo_vertices.push(TopoVertex {
+                id: vid,
+                node_id: nid,
+            });
             node_to_vertex.insert(nid, vid);
         }
     }
@@ -201,7 +204,10 @@ pub fn classify(mesh: &Mesh, angle_threshold_deg: f64) -> Topology {
             continue;
         }
         let vid = topo_vertices.len();
-        topo_vertices.push(TopoVertex { id: vid, node_id: nid });
+        topo_vertices.push(TopoVertex {
+            id: vid,
+            node_id: nid,
+        });
         node_to_vertex.insert(nid, vid);
     }
 
@@ -315,10 +321,7 @@ fn collect_boundary_faces(mesh: &Mesh) -> Vec<MeshFace> {
                 }
                 let nodes = face_count[sorted].clone();
                 let normal = compute_face_normal(&nodes, mesh);
-                faces.push(MeshFace {
-                    nodes,
-                    normal,
-                });
+                faces.push(MeshFace { nodes, normal });
             }
         }
     }

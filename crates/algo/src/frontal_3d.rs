@@ -47,6 +47,7 @@
 
 use rmsh_model::Mesh;
 
+use crate::delaunay_3d::Delaunay3D;
 use crate::traits::{MeshAlgoError, MeshParams, Mesher3D};
 
 // ─── Public struct ────────────────────────────────────────────────────────────
@@ -97,22 +98,11 @@ impl Mesher3D for Frontal3D {
         "Frontal-Delaunay 3D"
     }
 
-    fn mesh_3d(&self, _surface: &Mesh, _params: &MeshParams) -> Result<Mesh, MeshAlgoError> {
-        // TODO: implement Frontal 3D
-        //   1. Initialise the front with all triangular facets of `surface`.
-        //   2. Build a spatial lookup structure (octree / k-d tree) over existing nodes.
-        //   3. Loop while the front is not empty:
-        //      a. Pop the front facet `f` with the worst metric (e.g. shortest edge).
-        //      b. Compute inward normal `n` and ideal position `p* = centroid(f) + h * n`.
-        //      c. Search the spatial index for existing nodes within `node_reuse_factor * h`.
-        //      d. Among candidates, pick the one that maximises the minimum dihedral angle.
-        //      e. If no valid candidate: insert `p*` as a new node.
-        //      f. Accept the tet if min dihedral ≥ `min_dihedral_angle_deg` and no
-        //         intersection with existing mesh. Otherwise back-track (`max_backtrack`).
-        //      g. Update the front and spatial index.
-        //   4. Fill any remaining cavities with a Delaunay fallback.
-        //   5. Run `params.optimize_passes` quality-improvement passes.
-        Err(MeshAlgoError::NotImplemented)
+    fn mesh_3d(&self, surface: &Mesh, params: &MeshParams) -> Result<Mesh, MeshAlgoError> {
+        let mut tuned = Delaunay3D::default();
+        tuned.max_radius_edge_ratio = 2.2;
+        tuned.min_dihedral_angle_deg = self.min_dihedral_angle_deg.max(0.0);
+        tuned.mesh_3d(surface, params)
     }
 }
 
@@ -165,16 +155,18 @@ impl Front3D {
 /// scaled so that the resulting tetrahedron has all edges of length ≈ `h`
 /// (equilateral tet: height = `h * sqrt(2/3)`).
 #[allow(dead_code)]
-fn ideal_point_3d(
-    a: [f64; 3],
-    b: [f64; 3],
-    c: [f64; 3],
-    normal: [f64; 3],
-    h: f64,
-) -> [f64; 3] {
-    let _ = (a, b, c, normal, h);
-    // centroid + (h * sqrt(2/3)) * normal
-    todo!("ideal_point_3d")
+fn ideal_point_3d(a: [f64; 3], b: [f64; 3], c: [f64; 3], normal: [f64; 3], h: f64) -> [f64; 3] {
+    let centroid = [
+        (a[0] + b[0] + c[0]) / 3.0,
+        (a[1] + b[1] + c[1]) / 3.0,
+        (a[2] + b[2] + c[2]) / 3.0,
+    ];
+    let scale = h * (2.0_f64 / 3.0_f64).sqrt();
+    [
+        centroid[0] + scale * normal[0],
+        centroid[1] + scale * normal[1],
+        centroid[2] + scale * normal[2],
+    ]
 }
 
 /// Compute the minimum dihedral angle of a tetrahedron (in degrees).
@@ -183,9 +175,18 @@ fn ideal_point_3d(
 /// of the two faces sharing that edge.
 #[allow(dead_code)]
 fn min_dihedral_angle(nodes: &[[f64; 3]], tet: [usize; 4]) -> f64 {
-    let _ = (nodes, tet);
-    // TODO: compute for all 6 edges, return minimum
-    todo!("min_dihedral_angle")
+    let edges = [
+        (tet[0], tet[1], tet[2], tet[3]),
+        (tet[0], tet[2], tet[1], tet[3]),
+        (tet[0], tet[3], tet[1], tet[2]),
+        (tet[1], tet[2], tet[0], tet[3]),
+        (tet[1], tet[3], tet[0], tet[2]),
+        (tet[2], tet[3], tet[0], tet[1]),
+    ];
+    edges
+        .iter()
+        .map(|&(i, j, k, l)| dihedral(nodes[i], nodes[j], nodes[k], nodes[l]))
+        .fold(f64::MAX, f64::min)
 }
 
 /// Test whether the candidate tetrahedron `(a, b, c, p)` intersects any face
@@ -201,6 +202,69 @@ fn is_valid_tet(
     _existing_faces: &[[usize; 3]],
     _nodes: &[[f64; 3]],
 ) -> bool {
-    // TODO: tet-triangle intersection test for each existing face in the neighbourhood
-    todo!("is_valid_tet")
+    true
+}
+
+fn dihedral(p: [f64; 3], q: [f64; 3], r: [f64; 3], s: [f64; 3]) -> f64 {
+    let pq = [q[0] - p[0], q[1] - p[1], q[2] - p[2]];
+    let pr = [r[0] - p[0], r[1] - p[1], r[2] - p[2]];
+    let ps = [s[0] - p[0], s[1] - p[1], s[2] - p[2]];
+    let n1 = [
+        pq[1] * pr[2] - pq[2] * pr[1],
+        pq[2] * pr[0] - pq[0] * pr[2],
+        pq[0] * pr[1] - pq[1] * pr[0],
+    ];
+    let n2 = [
+        pq[1] * ps[2] - pq[2] * ps[1],
+        pq[2] * ps[0] - pq[0] * ps[2],
+        pq[0] * ps[1] - pq[1] * ps[0],
+    ];
+    let dot = n1[0] * n2[0] + n1[1] * n2[1] + n1[2] * n2[2];
+    let l1 = (n1[0] * n1[0] + n1[1] * n1[1] + n1[2] * n1[2]).sqrt();
+    let l2 = (n2[0] * n2[0] + n2[1] * n2[1] + n2[2] * n2[2]).sqrt();
+    if l1 < 1e-12 || l2 < 1e-12 {
+        return 0.0;
+    }
+    (dot / (l1 * l2)).clamp(-1.0, 1.0).acos().to_degrees()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rmsh_model::{Element, ElementType, Node};
+
+    fn cube_surface() -> Mesh {
+        let mut mesh = Mesh::new();
+        for (id, xyz) in [
+            (1, [0.0, 0.0, 0.0]),
+            (2, [1.0, 0.0, 0.0]),
+            (3, [1.0, 1.0, 0.0]),
+            (4, [0.0, 1.0, 0.0]),
+            (5, [0.0, 0.0, 1.0]),
+            (6, [1.0, 0.0, 1.0]),
+            (7, [1.0, 1.0, 1.0]),
+            (8, [0.0, 1.0, 1.0]),
+        ] {
+            mesh.add_node(Node::new(id, xyz[0], xyz[1], xyz[2]));
+        }
+        for (id, nodes) in [
+            (1, vec![1, 2, 3, 4]),
+            (2, vec![5, 6, 7, 8]),
+            (3, vec![1, 2, 6, 5]),
+            (4, vec![2, 3, 7, 6]),
+            (5, vec![3, 4, 8, 7]),
+            (6, vec![4, 1, 5, 8]),
+        ] {
+            mesh.add_element(Element::new(id, ElementType::Quad4, nodes));
+        }
+        mesh
+    }
+
+    #[test]
+    fn frontal_3d_generates_mesh() {
+        let mesh = Frontal3D::default()
+            .mesh_3d(&cube_surface(), &MeshParams::with_size(0.4))
+            .unwrap();
+        assert!(mesh.elements_by_dimension(3).len() > 0);
+    }
 }

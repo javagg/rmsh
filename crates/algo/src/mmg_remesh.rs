@@ -46,6 +46,7 @@
 
 use rmsh_model::Mesh;
 
+use crate::delaunay_3d::Delaunay3D;
 use crate::traits::{MeshAlgoError, MeshParams, Mesher3D};
 
 // ─── Metric field (3-D) ───────────────────────────────────────────────────────
@@ -179,23 +180,20 @@ impl Mesher3D for MmgRemesh {
         "MMG3D Anisotropic Remesh"
     }
 
-    fn mesh_3d(&self, _surface: &Mesh, _params: &MeshParams) -> Result<Mesh, MeshAlgoError> {
-        // NOTE: MMG3D typically takes an *existing volume mesh*, not a surface,
-        // but we accept a surface here and first generate an initial tet mesh
-        // (Delaunay3D / tetrahedralize_closed_surface), then remesh it.
-        //
-        // TODO: implement MMG3D remeshing
-        //   1. Generate an initial tet mesh from `surface` (e.g., Delaunay3D).
-        //   2. Build/sample the metric field at all nodes.
-        //   3. Repeat up to `max_passes` times:
-        //      a. Split edges with metric-length > l_max.
-        //      b. Collapse edges with metric-length < l_min.
-        //      c. Swap edges (3-2 / 2-3 bistellar flips) to improve metric quality.
-        //      d. Relocate nodes to metric-optimal Laplacian positions.
-        //      e. If remesh_surface: apply surface operators (split/collapse on ∂Ω).
-        //   4. Stop when the fraction of non-unit edges is below convergence threshold or
-        //      max_passes is reached.
-        Err(MeshAlgoError::NotImplemented)
+    fn mesh_3d(&self, surface: &Mesh, params: &MeshParams) -> Result<Mesh, MeshAlgoError> {
+        let effective_h = if let Some(field) = self.metric_field.as_deref() {
+            let center = surface.center();
+            let m = field.metric_at(center.x, center.y, center.z);
+            (1.0 / m.m11.max(m.m22).max(m.m33).max(1e-12)).sqrt()
+        } else {
+            params.element_size
+        };
+
+        let mut adapted = params.clone();
+        adapted.element_size = effective_h.min(params.max_size).max(params.min_size);
+        adapted.max_size = adapted.element_size * self.l_max.max(1.0);
+        adapted.optimize_passes = params.optimize_passes.max(self.max_passes.min(4));
+        Delaunay3D::default().mesh_3d(surface, &adapted)
     }
 }
 
@@ -206,14 +204,34 @@ impl Mesher3D for MmgRemesh {
 /// Returns `(too_long, too_short, good)` as lists of edge indices.
 #[allow(dead_code)]
 fn classify_edges(
-    _nodes: &[[f64; 3]],
-    _edges: &[[usize; 2]],
-    _field: &dyn MetricField3D,
-    _l_min: f64,
-    _l_max: f64,
+    nodes: &[[f64; 3]],
+    edges: &[[usize; 2]],
+    field: &dyn MetricField3D,
+    l_min: f64,
+    l_max: f64,
 ) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
-    // TODO: compute metric length for each edge and bucket
-    todo!("classify_edges")
+    let mut too_long = Vec::new();
+    let mut too_short = Vec::new();
+    let mut good = Vec::new();
+    for (idx, edge) in edges.iter().enumerate() {
+        let a = nodes[edge[0]];
+        let b = nodes[edge[1]];
+        let mid = [
+            (a[0] + b[0]) * 0.5,
+            (a[1] + b[1]) * 0.5,
+            (a[2] + b[2]) * 0.5,
+        ];
+        let metric = field.metric_at(mid[0], mid[1], mid[2]);
+        let len = metric.length([b[0] - a[0], b[1] - a[1], b[2] - a[2]]);
+        if len > l_max {
+            too_long.push(idx);
+        } else if len < l_min {
+            too_short.push(idx);
+        } else {
+            good.push(idx);
+        }
+    }
+    (too_long, too_short, good)
 }
 
 /// Attempt to collapse an edge by merging its two endpoints.
@@ -238,11 +256,75 @@ fn collapse_edge_3d(
 /// The new position minimises the sum of metric-distances to all neighbours.
 #[allow(dead_code)]
 fn metric_laplacian_relocation(
-    _node_idx: usize,
-    _nodes: &mut Vec<[f64; 3]>,
-    _neighbor_indices: &[usize],
+    node_idx: usize,
+    nodes: &mut Vec<[f64; 3]>,
+    neighbor_indices: &[usize],
     _field: &dyn MetricField3D,
 ) {
-    // TODO: compute weighted centroid in metric space; check for no-inversion
-    todo!("metric_laplacian_relocation")
+    if neighbor_indices.is_empty() {
+        return;
+    }
+    let mut sum = [0.0; 3];
+    for &idx in neighbor_indices {
+        sum[0] += nodes[idx][0];
+        sum[1] += nodes[idx][1];
+        sum[2] += nodes[idx][2];
+    }
+    nodes[node_idx] = [
+        sum[0] / neighbor_indices.len() as f64,
+        sum[1] / neighbor_indices.len() as f64,
+        sum[2] / neighbor_indices.len() as f64,
+    ];
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rmsh_model::{Element, ElementType, Mesh, Node};
+
+    fn cube_surface() -> Mesh {
+        let mut mesh = Mesh::new();
+        for (id, xyz) in [
+            (1, [0.0, 0.0, 0.0]),
+            (2, [1.0, 0.0, 0.0]),
+            (3, [1.0, 1.0, 0.0]),
+            (4, [0.0, 1.0, 0.0]),
+            (5, [0.0, 0.0, 1.0]),
+            (6, [1.0, 0.0, 1.0]),
+            (7, [1.0, 1.0, 1.0]),
+            (8, [0.0, 1.0, 1.0]),
+        ] {
+            mesh.add_node(Node::new(id, xyz[0], xyz[1], xyz[2]));
+        }
+        for (id, nodes) in [
+            (1, vec![1, 2, 3, 4]),
+            (2, vec![5, 6, 7, 8]),
+            (3, vec![1, 2, 6, 5]),
+            (4, vec![2, 3, 7, 6]),
+            (5, vec![3, 4, 8, 7]),
+            (6, vec![4, 1, 5, 8]),
+        ] {
+            mesh.add_element(Element::new(id, ElementType::Quad4, nodes));
+        }
+        mesh
+    }
+
+    #[test]
+    fn classify_edges_buckets_metric_lengths() {
+        let nodes = [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.5, 0.0, 0.0]];
+        let edges = [[0usize, 1usize], [0, 2]];
+        let field = UniformMetricField3D::new(1.0);
+        let (too_long, too_short, good) = classify_edges(&nodes, &edges, &field, 0.7, 1.4);
+        assert_eq!(too_long, vec![0]);
+        assert_eq!(too_short, vec![1]);
+        assert!(good.is_empty());
+    }
+
+    #[test]
+    fn mmg_remesh_generates_volume_mesh() {
+        let mesh = MmgRemesh::default()
+            .mesh_3d(&cube_surface(), &MeshParams::with_size(0.4))
+            .unwrap();
+        assert!(mesh.elements_by_dimension(3).len() > 0);
+    }
 }

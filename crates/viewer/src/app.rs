@@ -4,14 +4,17 @@ use std::path::PathBuf;
 use std::thread;
 
 use eframe::egui_wgpu;
-use rmsh_algo::{MeshParams, Mesher3D, Polygon2D};
+use rmsh_algo::{
+    Bamg2D, CentroidStarMesher3D, Delaunay3D, Domain2D, Frontal3D, FrontalDelaunay2D, Hxt3D,
+    MeshAdapt2D, MeshParams, Mesher2D, Mesher3D, MmgRemesh, Polygon2D, QuadPaving2D, QuadStrategy,
+};
 use rmsh_geo::extract::{PointData, SurfaceData, WireframeData};
-use rmsh_model::{Mesh, Point3, Topology, Vector3, GSelection};
+use rmsh_model::{GSelection, Mesh, Point3, Topology, Vector3};
 use rmsh_renderer::{RenderConfig, Scene};
 
 use crate::io::{
-    default_save_name, drain_io_events, enqueue_event, new_io_queue, request_open_dialog, request_open_path,
-    request_save_dialog, IoEvent, IoQueue, MshSaveFormat,
+    IoEvent, IoQueue, MshSaveFormat, default_save_name, drain_io_events, enqueue_event,
+    new_io_queue, request_open_dialog, request_open_path, request_save_dialog,
 };
 use crate::viewport::ViewportCallback;
 
@@ -43,18 +46,40 @@ pub struct RmshApp {
     recent_files: Vec<PathBuf>,
     /// Whether the currently loaded mesh came from a STEP file.
     source_is_step: bool,
-    /// Target edge length for 2D meshing.
-    meshing_size: f64,
-    /// Target edge length for 3D meshing.
-    meshing_size_3d: f64,
+    /// Whether the meshing configuration dialog is open.
+    meshing_dialog_open: bool,
+    /// Current meshing dimension.
+    meshing_dimension: MeshingDimension,
+    /// Selected 2D meshing algorithm.
+    meshing_algo_2d: MeshingAlgo2D,
+    /// Selected 3D meshing algorithm.
+    meshing_algo_3d: MeshingAlgo3D,
+    /// Common 2D mesh parameters.
+    meshing_params_2d: MeshParamState,
+    /// Common 3D mesh parameters.
+    meshing_params_3d: MeshParamState,
+    /// 2D MeshAdapt parameters.
+    mesh_adapt_2d: MeshAdapt2DSettings,
+    /// 2D Frontal-Delaunay parameters.
+    frontal_delaunay_2d: FrontalDelaunay2DSettings,
+    /// 2D BAMG parameters.
+    bamg_2d: Bamg2DSettings,
+    /// 2D Quad Paving parameters.
+    quad_paving_2d: QuadPaving2DSettings,
     /// Whether a background meshing task is running.
     meshing_in_progress: bool,
     /// Current meshing progress [0, 1].
     meshing_progress: f32,
     /// Meshing status line.
     meshing_message: String,
-    /// Selected 3D meshing algorithm.
-    meshing_algo_3d: MeshingAlgo3D,
+    /// 3D Delaunay parameters.
+    delaunay_3d: Delaunay3DSettings,
+    /// 3D Frontal parameters.
+    frontal_3d: Frontal3DSettings,
+    /// 3D HXT parameters.
+    hxt_3d: Hxt3DSettings,
+    /// 3D MMG parameters.
+    mmg_3d: Mmg3DSettings,
     /// Hidden geometric region IDs.
     hidden_regions: HashSet<usize>,
     /// Hidden geometric face IDs.
@@ -66,16 +91,301 @@ pub struct RmshApp {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MeshingDimension {
+    Surface2D,
+    Volume3D,
+}
+
+impl MeshingDimension {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Surface2D => "2D Surface",
+            Self::Volume3D => "3D Volume",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MeshingAlgo2D {
+    Delaunay,
+    MeshAdapt,
+    FrontalDelaunay,
+    Bamg,
+    QuadPaving,
+}
+
+impl MeshingAlgo2D {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Delaunay => "Triangulate2D",
+            Self::MeshAdapt => "MeshAdapt 2D",
+            Self::FrontalDelaunay => "Frontal-Delaunay 2D",
+            Self::Bamg => "BAMG 2D",
+            Self::QuadPaving => "Quad Paving 2D",
+        }
+    }
+
+    fn slug(self) -> &'static str {
+        match self {
+            Self::Delaunay => "triangulate2d",
+            Self::MeshAdapt => "mesh_adapt_2d",
+            Self::FrontalDelaunay => "frontal_delaunay_2d",
+            Self::Bamg => "bamg_2d",
+            Self::QuadPaving => "quad_paving_2d",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Delaunay =>
+                "Constrained Delaunay triangulation. Fast and robust. \n\
+                 Recommended for flat/simple surfaces where speed matters more than \n\
+                 element uniformity. Does not use size/optimization parameters.",
+            Self::MeshAdapt =>
+                "Iterative mesh adaptation: splits long edges and collapses short ones. \n\
+                 Good for surfaces with strongly varying curvature or where local \n\
+                 refinement passes are needed. Controls: adaptation passes, split/collapse ratios.",
+            Self::FrontalDelaunay =>
+                "Advances a front at ideal angles, then inserts nodes via Delaunay. \n\
+                 Produces high-quality triangles with well-controlled face angles. \n\
+                 Good general-purpose choice when element quality is important.",
+            Self::Bamg =>
+                "Bidimensional Anisotropic Mesh Generator. Applies a metric-based \n\
+                 refinement loop for directionally stretched geometry or when anisotropic \n\
+                 element shapes are required. Best when the surface has dominant directional features.",
+            Self::QuadPaving =>
+                "Generates predominantly quadrilateral elements by advancing quad fronts. \n\
+                 Choose Recombine for a tri-to-quad conversion, QuasiStructured for \n\
+                 structured-looking patches, or PackingOfParallelograms for a uniform grid.",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MeshingAlgo3D {
     CentroidStar,
     Delaunay,
+    Frontal,
+    Hxt,
+    Mmg,
 }
 
 impl MeshingAlgo3D {
     fn label(self) -> &'static str {
         match self {
             Self::CentroidStar => "Centroid-Star (stable)",
-            Self::Delaunay => "Delaunay3D (experimental)",
+            Self::Delaunay => "Delaunay3D",
+            Self::Frontal => "Frontal-Delaunay 3D",
+            Self::Hxt => "HXT 3D",
+            Self::Mmg => "MMG3D",
+        }
+    }
+
+    fn slug(self) -> &'static str {
+        match self {
+            Self::CentroidStar => "centroid_star",
+            Self::Delaunay => "delaunay",
+            Self::Frontal => "frontal",
+            Self::Hxt => "hxt",
+            Self::Mmg => "mmg",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::CentroidStar =>
+                "Simple centroid-based tetrahedral decomposition. Very stable and \n\
+                 guaranteed to terminate even on difficult geometry. Produces \n\
+                 lower-quality elements; use as a fallback when other algorithms fail.",
+            Self::Delaunay =>
+                "Constrained 3D Delaunay with quality refinement. Good balance of \n\
+                 speed and element quality. Radius-edge ratio and minimum dihedral \n\
+                 angle control quality; off-center insertion improves poorly-shaped tets.",
+            Self::Frontal =>
+                "Frontal point insertion guided by Delaunay. Produces higher-quality \n\
+                 tetrahedra, especially near complex boundaries or thin-walled regions. \n\
+                 Slower than Delaunay but better element shapes.",
+            Self::Hxt =>
+                "High-performance parallel Delaunay tetrahedral mesher. Very fast on \n\
+                 multi-core machines due to cache-friendly Hilbert ordering. \n\
+                 Recommended for large or fine-resolution volumes where speed is critical.",
+            Self::Mmg =>
+                "Anisotropic remeshing with explicit metric control (l_min / l_max). \n\
+                 Best when remeshing an existing volume or when you need precise \n\
+                 directional control over element sizes. Can optionally remesh the surface.",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MeshParamState {
+    element_size: f64,
+    min_size: f64,
+    max_size: f64,
+    optimize_passes: u32,
+}
+
+impl MeshParamState {
+    fn with_size(element_size: f64) -> Self {
+        let params = MeshParams::with_size(element_size);
+        Self {
+            element_size: params.element_size,
+            min_size: params.min_size,
+            max_size: params.max_size,
+            optimize_passes: params.optimize_passes,
+        }
+    }
+
+    fn to_mesh_params(&self) -> MeshParams {
+        MeshParams {
+            element_size: self.element_size,
+            min_size: self.min_size,
+            max_size: self.max_size,
+            optimize_passes: self.optimize_passes,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MeshAdapt2DSettings {
+    max_passes: u32,
+    split_ratio: f64,
+    collapse_ratio: f64,
+}
+
+impl Default for MeshAdapt2DSettings {
+    fn default() -> Self {
+        let defaults = MeshAdapt2D::default();
+        Self {
+            max_passes: defaults.max_passes,
+            split_ratio: defaults.split_ratio,
+            collapse_ratio: defaults.collapse_ratio,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FrontalDelaunay2DSettings {
+    ideal_triangle_angle_deg: f64,
+    front_closure_tol: f64,
+}
+
+impl Default for FrontalDelaunay2DSettings {
+    fn default() -> Self {
+        let defaults = FrontalDelaunay2D::default();
+        Self {
+            ideal_triangle_angle_deg: defaults.ideal_triangle_angle_deg,
+            front_closure_tol: defaults.front_closure_tol,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Bamg2DSettings {
+    max_passes: u32,
+    convergence_threshold: f64,
+}
+
+impl Default for Bamg2DSettings {
+    fn default() -> Self {
+        let defaults = Bamg2D::default();
+        Self {
+            max_passes: defaults.max_passes,
+            convergence_threshold: defaults.convergence_threshold,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct QuadPaving2DSettings {
+    strategy: QuadStrategy,
+    cross_field_iterations: u32,
+    require_pure_quad: bool,
+}
+
+impl Default for QuadPaving2DSettings {
+    fn default() -> Self {
+        let defaults = QuadPaving2D::default();
+        Self {
+            strategy: defaults.strategy,
+            cross_field_iterations: defaults.cross_field_iterations,
+            require_pure_quad: defaults.require_pure_quad,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Delaunay3DSettings {
+    max_radius_edge_ratio: f64,
+    min_dihedral_angle_deg: f64,
+    use_off_center_insertion: bool,
+}
+
+impl Default for Delaunay3DSettings {
+    fn default() -> Self {
+        let defaults = Delaunay3D::default();
+        Self {
+            max_radius_edge_ratio: defaults.max_radius_edge_ratio,
+            min_dihedral_angle_deg: defaults.min_dihedral_angle_deg,
+            use_off_center_insertion: defaults.use_off_center_insertion,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Frontal3DSettings {
+    node_reuse_factor: f64,
+    min_dihedral_angle_deg: f64,
+    max_backtrack: u32,
+}
+
+impl Default for Frontal3DSettings {
+    fn default() -> Self {
+        let defaults = Frontal3D::default();
+        Self {
+            node_reuse_factor: defaults.node_reuse_factor,
+            min_dihedral_angle_deg: defaults.min_dihedral_angle_deg,
+            max_backtrack: defaults.max_backtrack,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Hxt3DSettings {
+    num_threads: usize,
+    hilbert_order: u32,
+    conflict_buffer_size: usize,
+    enable_refinement: bool,
+}
+
+impl Default for Hxt3DSettings {
+    fn default() -> Self {
+        let defaults = Hxt3D::default();
+        Self {
+            num_threads: defaults.num_threads,
+            hilbert_order: defaults.hilbert_order,
+            conflict_buffer_size: defaults.conflict_buffer_size,
+            enable_refinement: defaults.enable_refinement,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Mmg3DSettings {
+    l_min: f64,
+    l_max: f64,
+    max_passes: u32,
+    remesh_surface: bool,
+}
+
+impl Default for Mmg3DSettings {
+    fn default() -> Self {
+        let defaults = MmgRemesh::default();
+        Self {
+            l_min: defaults.l_min,
+            l_max: defaults.l_max,
+            max_passes: defaults.max_passes,
+            remesh_surface: defaults.remesh_surface,
         }
     }
 }
@@ -122,12 +432,23 @@ impl RmshApp {
             angle_threshold_deg: 40.0,
             recent_files,
             source_is_step: false,
-            meshing_size: 0.25,
-            meshing_size_3d: 0.25,
+            meshing_dialog_open: false,
+            meshing_dimension: MeshingDimension::Volume3D,
+            meshing_algo_2d: MeshingAlgo2D::Delaunay,
+            meshing_algo_3d: MeshingAlgo3D::CentroidStar,
+            meshing_params_2d: MeshParamState::with_size(0.25),
+            meshing_params_3d: MeshParamState::with_size(0.25),
+            mesh_adapt_2d: MeshAdapt2DSettings::default(),
+            frontal_delaunay_2d: FrontalDelaunay2DSettings::default(),
+            bamg_2d: Bamg2DSettings::default(),
+            quad_paving_2d: QuadPaving2DSettings::default(),
             meshing_in_progress: false,
             meshing_progress: 0.0,
             meshing_message: String::new(),
-            meshing_algo_3d: MeshingAlgo3D::CentroidStar,
+            delaunay_3d: Delaunay3DSettings::default(),
+            frontal_3d: Frontal3DSettings::default(),
+            hxt_3d: Hxt3DSettings::default(),
+            mmg_3d: Mmg3DSettings::default(),
             hidden_regions: HashSet::new(),
             hidden_faces: HashSet::new(),
             hidden_edges: HashSet::new(),
@@ -142,7 +463,12 @@ impl RmshApp {
         self.recent_files.truncate(10);
     }
 
-    fn apply_loaded_mesh(&mut self, file_name: &str, data: &[u8], path: Option<PathBuf>) -> anyhow::Result<()> {
+    fn apply_loaded_mesh(
+        &mut self,
+        file_name: &str,
+        data: &[u8],
+        path: Option<PathBuf>,
+    ) -> anyhow::Result<()> {
         let ext = path
             .as_ref()
             .and_then(|p| p.extension())
@@ -158,10 +484,10 @@ impl RmshApp {
         self.source_is_step = matches!(ext.as_deref(), Some("step") | Some("stp"));
 
         let mesh = match ext.as_deref() {
-            Some("msh") => rmsh_io::load_msh_from_bytes(data)
-                .map_err(anyhow::Error::from)?,
-            Some("step") | Some("stp") => rmsh_io::load_step_from_bytes(data)
-                .map_err(anyhow::Error::from)?,
+            Some("msh") => rmsh_io::load_msh_from_bytes(data).map_err(anyhow::Error::from)?,
+            Some("step") | Some("stp") => {
+                rmsh_io::load_step_from_bytes(data).map_err(anyhow::Error::from)?
+            }
             _ => rmsh_io::load_msh_from_bytes(data)
                 .map_err(anyhow::Error::from)
                 .or_else(|_| rmsh_io::load_step_from_bytes(data).map_err(anyhow::Error::from))?,
@@ -222,6 +548,23 @@ impl RmshApp {
         self.scene_initialized = false;
     }
 
+    fn open_meshing_dialog(&mut self) {
+        self.meshing_dialog_open = true;
+        self.meshing_dimension =
+            if self.source_is_step && matches!(self.topo_selection, Some(GSelection::Face(_))) {
+                MeshingDimension::Surface2D
+            } else {
+                MeshingDimension::Volume3D
+            };
+    }
+
+    fn start_selected_meshing(&mut self, ctx: &egui::Context) {
+        match self.meshing_dimension {
+            MeshingDimension::Surface2D => self.start_2d_meshing(ctx),
+            MeshingDimension::Volume3D => self.start_3d_meshing(ctx),
+        }
+    }
+
     fn start_2d_meshing(&mut self, ctx: &egui::Context) {
         if self.meshing_in_progress {
             return;
@@ -237,19 +580,24 @@ impl RmshApp {
             return;
         };
 
-        let mesh_size = self.meshing_size;
+        let algo = self.meshing_algo_2d;
+        let params = self.meshing_params_2d.clone();
+        let mesh_adapt = self.mesh_adapt_2d.clone();
+        let frontal = self.frontal_delaunay_2d.clone();
+        let bamg = self.bamg_2d.clone();
+        let quad = self.quad_paving_2d.clone();
         let queue = self.io_queue.clone();
         let egui_ctx = ctx.clone();
 
         self.meshing_in_progress = true;
         self.meshing_progress = 0.0;
-        self.meshing_message = "Preparing 2D meshing".to_string();
+        self.meshing_message = format!("Preparing 2D meshing with {}", algo.label());
 
         thread::spawn(move || {
             enqueue_event(
                 &queue,
                 IoEvent::MeshingStarted {
-                    message: format!("Start meshing face {}", face_id),
+                    message: format!("Start meshing face {} with {}", face_id, algo.label()),
                 },
             );
             egui_ctx.request_repaint();
@@ -265,13 +613,24 @@ impl RmshApp {
                 egui_ctx.request_repaint();
             };
 
-            match mesh_face_async(&mesh, &topo, face_id, mesh_size, &mut report) {
+            match mesh_face_async(
+                &mesh,
+                &topo,
+                face_id,
+                algo,
+                &params,
+                &mesh_adapt,
+                &frontal,
+                &bamg,
+                &quad,
+                &mut report,
+            ) {
                 Ok(generated) => {
                     enqueue_event(
                         &queue,
                         IoEvent::MeshGenerated {
                             mesh: generated,
-                            mesh_name: format!("meshed_face_{}.msh", face_id),
+                            mesh_name: format!("meshed_face_{}_{}.msh", face_id, algo.slug()),
                         },
                     );
                 }
@@ -292,14 +651,17 @@ impl RmshApp {
             return;
         };
         let algo = self.meshing_algo_3d;
-        let mesh_size_3d = self.meshing_size_3d;
-
+        let params = self.meshing_params_3d.clone();
+        let delaunay = self.delaunay_3d.clone();
+        let frontal = self.frontal_3d.clone();
+        let hxt = self.hxt_3d.clone();
+        let mmg = self.mmg_3d.clone();
         let queue = self.io_queue.clone();
         let egui_ctx = ctx.clone();
 
         self.meshing_in_progress = true;
         self.meshing_progress = 0.0;
-        self.meshing_message = "Preparing 3D meshing".to_string();
+        self.meshing_message = format!("Preparing 3D meshing with {}", algo.label());
 
         thread::spawn(move || {
             enqueue_event(
@@ -317,23 +679,13 @@ impl RmshApp {
                     message: format!(
                         "Building tetrahedra with {} (target size {:.4})",
                         algo.label(),
-                        mesh_size_3d
+                        params.element_size
                     ),
                 },
             );
             egui_ctx.request_repaint();
 
-            let params = MeshParams::with_size(mesh_size_3d);
-            let result = match algo {
-                MeshingAlgo3D::CentroidStar => {
-                    let mesher = rmsh_algo::CentroidStarMesher3D;
-                    mesher.mesh_3d(&mesh, &params)
-                }
-                MeshingAlgo3D::Delaunay => {
-                    let mesher = rmsh_algo::Delaunay3D::default();
-                    mesher.mesh_3d(&mesh, &params)
-                }
-            };
+            let result = mesh_volume_async(&mesh, algo, &params, &delaunay, &frontal, &hxt, &mmg);
 
             match result {
                 Ok(generated) => {
@@ -348,13 +700,7 @@ impl RmshApp {
                         &queue,
                         IoEvent::MeshGenerated {
                             mesh: generated,
-                            mesh_name: format!(
-                                "meshed_volume_3d_{}.msh",
-                                match algo {
-                                    MeshingAlgo3D::CentroidStar => "centroid_star",
-                                    MeshingAlgo3D::Delaunay => "delaunay",
-                                }
-                            ),
+                            mesh_name: format!("meshed_volume_3d_{}.msh", algo.slug()),
                         },
                     );
                 }
@@ -367,6 +713,318 @@ impl RmshApp {
         });
     }
 
+    fn meshing_ready_message(&self) -> Option<String> {
+        if self.meshing_in_progress {
+            return Some("Meshing is already running.".to_string());
+        }
+        if !self.source_is_step {
+            return Some("Load a STEP model to enable meshing.".to_string());
+        }
+        match self.meshing_dimension {
+            MeshingDimension::Surface2D => {
+                if !matches!(self.topo_selection, Some(GSelection::Face(_))) {
+                    Some("Select one face in the Topology panel first.".to_string())
+                } else if self.meshing_params_2d.element_size <= 0.0
+                    || self.meshing_params_2d.min_size <= 0.0
+                    || self.meshing_params_2d.max_size < self.meshing_params_2d.min_size
+                {
+                    Some("2D mesh parameters are invalid.".to_string())
+                } else {
+                    None
+                }
+            }
+            MeshingDimension::Volume3D => {
+                if self.meshing_params_3d.element_size <= 0.0
+                    || self.meshing_params_3d.min_size <= 0.0
+                    || self.meshing_params_3d.max_size < self.meshing_params_3d.min_size
+                {
+                    Some("3D mesh parameters are invalid.".to_string())
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn show_meshing_dialog(&mut self, ctx: &egui::Context) {
+        if !self.meshing_dialog_open {
+            return;
+        }
+
+        let mut open = self.meshing_dialog_open;
+        let mut should_close = false;
+        egui::Window::new("Meshing")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .default_width(420.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.selectable_value(
+                        &mut self.meshing_dimension,
+                        MeshingDimension::Surface2D,
+                        MeshingDimension::Surface2D.label(),
+                    );
+                    ui.selectable_value(
+                        &mut self.meshing_dimension,
+                        MeshingDimension::Volume3D,
+                        MeshingDimension::Volume3D.label(),
+                    );
+                });
+                ui.separator();
+
+                match self.meshing_dimension {
+                    MeshingDimension::Surface2D => self.show_2d_meshing_settings(ui),
+                    MeshingDimension::Volume3D => self.show_3d_meshing_settings(ui),
+                }
+
+                ui.separator();
+                if let Some(message) = self.meshing_ready_message() {
+                    ui.small(message);
+                }
+                if self.meshing_in_progress || !self.meshing_message.is_empty() {
+                    ui.add(
+                        egui::ProgressBar::new(self.meshing_progress)
+                            .show_percentage()
+                            .text(&self.meshing_message),
+                    );
+                }
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            self.meshing_ready_message().is_none(),
+                            egui::Button::new("Generate"),
+                        )
+                        .clicked()
+                    {
+                        self.start_selected_meshing(ctx);
+                    }
+                    if ui.button("Close").clicked() {
+                        should_close = true;
+                    }
+                });
+            });
+        self.meshing_dialog_open = open && !should_close;
+    }
+
+    fn show_2d_meshing_settings(&mut self, ui: &mut egui::Ui) {
+        ui.label("Algorithm");
+        egui::ComboBox::from_id_salt("meshing_algo_2d")
+            .selected_text(self.meshing_algo_2d.label())
+            .show_ui(ui, |ui| {
+                for algo in [
+                    MeshingAlgo2D::Delaunay,
+                    MeshingAlgo2D::MeshAdapt,
+                    MeshingAlgo2D::FrontalDelaunay,
+                    MeshingAlgo2D::Bamg,
+                    MeshingAlgo2D::QuadPaving,
+                ] {
+                    ui.selectable_value(&mut self.meshing_algo_2d, algo, algo.label());
+                }
+            });
+        egui::Frame::new()
+            .fill(ui.visuals().faint_bg_color)
+            .inner_margin(egui::Margin::symmetric(8, 6))
+            .corner_radius(4.0)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(
+                    egui::RichText::new(self.meshing_algo_2d.description())
+                        .small()
+                        .weak(),
+                );
+            });
+        ui.separator();
+        render_mesh_param_editor(
+            ui,
+            &mut self.meshing_params_2d,
+            self.meshing_algo_2d != MeshingAlgo2D::Delaunay,
+        );
+        ui.separator();
+
+        match self.meshing_algo_2d {
+            MeshingAlgo2D::Delaunay => {
+            }
+            MeshingAlgo2D::MeshAdapt => {
+                ui.label("Adaptation passes");
+                ui.add(egui::DragValue::new(&mut self.mesh_adapt_2d.max_passes).range(0..=100));
+                ui.label("Split ratio");
+                ui.add(
+                    egui::DragValue::new(&mut self.mesh_adapt_2d.split_ratio)
+                        .range(0.1..=10.0)
+                        .speed(0.05),
+                );
+                ui.label("Collapse ratio");
+                ui.add(
+                    egui::DragValue::new(&mut self.mesh_adapt_2d.collapse_ratio)
+                        .range(0.01..=5.0)
+                        .speed(0.05),
+                );
+            }
+            MeshingAlgo2D::FrontalDelaunay => {
+                ui.label("Ideal triangle angle (deg)");
+                ui.add(
+                    egui::DragValue::new(&mut self.frontal_delaunay_2d.ideal_triangle_angle_deg)
+                        .range(1.0..=89.0)
+                        .speed(0.5),
+                );
+                ui.label("Front closure tolerance");
+                ui.add(
+                    egui::DragValue::new(&mut self.frontal_delaunay_2d.front_closure_tol)
+                        .range(1.0e-12..=1.0)
+                        .speed(1.0e-6),
+                );
+            }
+            MeshingAlgo2D::Bamg => {
+                ui.label("Max passes");
+                ui.add(egui::DragValue::new(&mut self.bamg_2d.max_passes).range(0..=100));
+                ui.label("Convergence threshold");
+                ui.add(
+                    egui::DragValue::new(&mut self.bamg_2d.convergence_threshold)
+                        .range(0.0001..=1.0)
+                        .speed(0.001),
+                );
+            }
+            MeshingAlgo2D::QuadPaving => {
+                ui.label("Strategy");
+                egui::ComboBox::from_id_salt("quad_paving_strategy")
+                    .selected_text(match self.quad_paving_2d.strategy {
+                        QuadStrategy::PackingOfParallelograms => "Packing of Parallelograms",
+                        QuadStrategy::QuasiStructured => "Quasi-Structured",
+                        QuadStrategy::Recombine => "Recombine",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.quad_paving_2d.strategy,
+                            QuadStrategy::PackingOfParallelograms,
+                            "Packing of Parallelograms",
+                        );
+                        ui.selectable_value(
+                            &mut self.quad_paving_2d.strategy,
+                            QuadStrategy::QuasiStructured,
+                            "Quasi-Structured",
+                        );
+                        ui.selectable_value(
+                            &mut self.quad_paving_2d.strategy,
+                            QuadStrategy::Recombine,
+                            "Recombine",
+                        );
+                    });
+                ui.label("Cross-field iterations");
+                ui.add(
+                    egui::DragValue::new(&mut self.quad_paving_2d.cross_field_iterations)
+                        .range(0..=500),
+                );
+                ui.checkbox(
+                    &mut self.quad_paving_2d.require_pure_quad,
+                    "Require pure quad output",
+                );
+            }
+        }
+    }
+
+    fn show_3d_meshing_settings(&mut self, ui: &mut egui::Ui) {
+        ui.label("Algorithm");
+        egui::ComboBox::from_id_salt("meshing_algo_3d")
+            .selected_text(self.meshing_algo_3d.label())
+            .show_ui(ui, |ui| {
+                for algo in [
+                    MeshingAlgo3D::CentroidStar,
+                    MeshingAlgo3D::Delaunay,
+                    MeshingAlgo3D::Frontal,
+                    MeshingAlgo3D::Hxt,
+                    MeshingAlgo3D::Mmg,
+                ] {
+                    ui.selectable_value(&mut self.meshing_algo_3d, algo, algo.label());
+                }
+            });
+        egui::Frame::new()
+            .fill(ui.visuals().faint_bg_color)
+            .inner_margin(egui::Margin::symmetric(8, 6))
+            .corner_radius(4.0)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(
+                    egui::RichText::new(self.meshing_algo_3d.description())
+                        .small()
+                        .weak(),
+                );
+            });
+        ui.separator();
+        render_mesh_param_editor(ui, &mut self.meshing_params_3d, true);
+        ui.separator();
+
+        match self.meshing_algo_3d {
+            MeshingAlgo3D::CentroidStar => {
+            }
+            MeshingAlgo3D::Delaunay => {
+                ui.label("Max radius-edge ratio");
+                ui.add(
+                    egui::DragValue::new(&mut self.delaunay_3d.max_radius_edge_ratio)
+                        .range(1.0..=10.0)
+                        .speed(0.1),
+                );
+                ui.label("Min dihedral angle (deg)");
+                ui.add(
+                    egui::DragValue::new(&mut self.delaunay_3d.min_dihedral_angle_deg)
+                        .range(0.0..=60.0)
+                        .speed(0.5),
+                );
+                ui.checkbox(
+                    &mut self.delaunay_3d.use_off_center_insertion,
+                    "Use off-center insertion",
+                );
+            }
+            MeshingAlgo3D::Frontal => {
+                ui.label("Node reuse factor");
+                ui.add(
+                    egui::DragValue::new(&mut self.frontal_3d.node_reuse_factor)
+                        .range(0.1..=10.0)
+                        .speed(0.1),
+                );
+                ui.label("Min dihedral angle (deg)");
+                ui.add(
+                    egui::DragValue::new(&mut self.frontal_3d.min_dihedral_angle_deg)
+                        .range(0.0..=60.0)
+                        .speed(0.5),
+                );
+                ui.label("Max backtrack");
+                ui.add(egui::DragValue::new(&mut self.frontal_3d.max_backtrack).range(0..=200));
+            }
+            MeshingAlgo3D::Hxt => {
+                ui.label("Threads (0 = auto)");
+                ui.add(egui::DragValue::new(&mut self.hxt_3d.num_threads).range(0..=256));
+                ui.label("Hilbert order");
+                ui.add(egui::DragValue::new(&mut self.hxt_3d.hilbert_order).range(1..=20));
+                ui.label("Conflict buffer size");
+                ui.add(
+                    egui::DragValue::new(&mut self.hxt_3d.conflict_buffer_size)
+                        .range(1..=1_000_000),
+                );
+                ui.checkbox(&mut self.hxt_3d.enable_refinement, "Enable refinement");
+            }
+            MeshingAlgo3D::Mmg => {
+                ui.label("Metric edge lower bound");
+                ui.add(
+                    egui::DragValue::new(&mut self.mmg_3d.l_min)
+                        .range(0.01..=10.0)
+                        .speed(0.05),
+                );
+                ui.label("Metric edge upper bound");
+                ui.add(
+                    egui::DragValue::new(&mut self.mmg_3d.l_max)
+                        .range(0.01..=10.0)
+                        .speed(0.05),
+                );
+                ui.label("Max passes");
+                ui.add(egui::DragValue::new(&mut self.mmg_3d.max_passes).range(0..=100));
+                ui.checkbox(&mut self.mmg_3d.remesh_surface, "Remesh surface");
+            }
+        }
+    }
+
     fn has_visibility_overrides(&self) -> bool {
         !self.hidden_regions.is_empty()
             || !self.hidden_faces.is_empty()
@@ -374,7 +1032,11 @@ impl RmshApp {
             || !self.hidden_vertices.is_empty()
     }
 
-    fn extract_visible_geometry(&self, mesh: &Mesh, topo: &Topology) -> (SurfaceData, WireframeData, PointData) {
+    fn extract_visible_geometry(
+        &self,
+        mesh: &Mesh,
+        topo: &Topology,
+    ) -> (SurfaceData, WireframeData, PointData) {
         // Region -> faces ownership map
         let mut face_to_regions: HashMap<usize, Vec<usize>> = HashMap::new();
         for region in &topo.regions {
@@ -410,7 +1072,9 @@ impl RmshApp {
                     return false;
                 }
                 match face_to_regions.get(&f.id) {
-                    Some(owners) if !owners.is_empty() => owners.iter().any(|rid| visible_regions.contains(rid)),
+                    Some(owners) if !owners.is_empty() => {
+                        owners.iter().any(|rid| visible_regions.contains(rid))
+                    }
                     _ => true,
                 }
             })
@@ -425,7 +1089,9 @@ impl RmshApp {
                     return false;
                 }
                 match edge_to_faces.get(&e.id) {
-                    Some(owners) if !owners.is_empty() => owners.iter().any(|fid| visible_faces.contains(fid)),
+                    Some(owners) if !owners.is_empty() => {
+                        owners.iter().any(|fid| visible_faces.contains(fid))
+                    }
                     _ => true,
                 }
             })
@@ -458,7 +1124,13 @@ impl RmshApp {
                 let pts: Vec<[f32; 3]> = poly
                     .iter()
                     .filter_map(|nid| mesh.nodes.get(nid))
-                    .map(|n| [n.position.x as f32, n.position.y as f32, n.position.z as f32])
+                    .map(|n| {
+                        [
+                            n.position.x as f32,
+                            n.position.y as f32,
+                            n.position.z as f32,
+                        ]
+                    })
                     .collect();
                 if pts.len() < 3 {
                     continue;
@@ -491,18 +1163,24 @@ impl RmshApp {
                     continue;
                 };
                 let idx = wireframe.positions.len() as u32;
-                wireframe
-                    .positions
-                    .push([a.position.x as f32, a.position.y as f32, a.position.z as f32]);
-                wireframe
-                    .positions
-                    .push([b.position.x as f32, b.position.y as f32, b.position.z as f32]);
+                wireframe.positions.push([
+                    a.position.x as f32,
+                    a.position.y as f32,
+                    a.position.z as f32,
+                ]);
+                wireframe.positions.push([
+                    b.position.x as f32,
+                    b.position.y as f32,
+                    b.position.z as f32,
+                ]);
                 wireframe.indices.push(idx);
                 wireframe.indices.push(idx + 1);
             }
         }
 
-        let mut points = PointData { positions: Vec::new() };
+        let mut points = PointData {
+            positions: Vec::new(),
+        };
         for vertex in &topo.vertices {
             if !visible_vertices.contains(&vertex.id) {
                 continue;
@@ -515,10 +1193,15 @@ impl RmshApp {
                 }
                 let mut endpoints: Vec<usize> = edge.vertex_ids.iter().filter_map(|v| *v).collect();
                 if endpoints.is_empty() {
-                    if let Some(first) = edge.node_ids.first().and_then(|nid| node_to_vertex.get(nid)) {
+                    if let Some(first) = edge
+                        .node_ids
+                        .first()
+                        .and_then(|nid| node_to_vertex.get(nid))
+                    {
                         endpoints.push(*first);
                     }
-                    if let Some(last) = edge.node_ids.last().and_then(|nid| node_to_vertex.get(nid)) {
+                    if let Some(last) = edge.node_ids.last().and_then(|nid| node_to_vertex.get(nid))
+                    {
                         if !endpoints.contains(last) {
                             endpoints.push(*last);
                         }
@@ -532,15 +1215,23 @@ impl RmshApp {
 
             let is_orphan = !topo.edges.iter().any(|e| {
                 e.vertex_ids.iter().flatten().any(|vid| *vid == vertex.id)
-                    || e.node_ids.first().map(|nid| node_to_vertex.get(nid) == Some(&vertex.id)).unwrap_or(false)
-                    || e.node_ids.last().map(|nid| node_to_vertex.get(nid) == Some(&vertex.id)).unwrap_or(false)
+                    || e.node_ids
+                        .first()
+                        .map(|nid| node_to_vertex.get(nid) == Some(&vertex.id))
+                        .unwrap_or(false)
+                    || e.node_ids
+                        .last()
+                        .map(|nid| node_to_vertex.get(nid) == Some(&vertex.id))
+                        .unwrap_or(false)
             });
 
             if has_visible_owner || is_orphan {
                 if let Some(n) = mesh.nodes.get(&vertex.node_id) {
-                    points
-                        .positions
-                        .push([n.position.x as f32, n.position.y as f32, n.position.z as f32]);
+                    points.positions.push([
+                        n.position.x as f32,
+                        n.position.y as f32,
+                        n.position.z as f32,
+                    ]);
                 }
             }
         }
@@ -584,10 +1275,9 @@ impl RmshApp {
             // Fit camera to mesh
             let center = mesh.center();
             let diag = mesh.diagonal_length() as f32;
-            scene.camera.fit_to_bbox(
-                [center.x as f32, center.y as f32, center.z as f32],
-                diag,
-            );
+            scene
+                .camera
+                .fit_to_bbox([center.x as f32, center.y as f32, center.z as f32], diag);
         }
         self.scene_initialized = true;
         self.highlight_dirty = true;
@@ -639,12 +1329,14 @@ impl eframe::App for RmshApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         for event in drain_io_events(&self.io_queue) {
             match event {
-                IoEvent::MeshLoaded { file_name, data, path } => {
-                    match self.apply_loaded_mesh(&file_name, &data, path) {
-                        Ok(()) => log::info!("Loaded mesh: {}", file_name),
-                        Err(e) => log::error!("Failed to load mesh: {}", e),
-                    }
-                }
+                IoEvent::MeshLoaded {
+                    file_name,
+                    data,
+                    path,
+                } => match self.apply_loaded_mesh(&file_name, &data, path) {
+                    Ok(()) => log::info!("Loaded mesh: {}", file_name),
+                    Err(e) => log::error!("Failed to load mesh: {}", e),
+                },
                 IoEvent::MeshGenerated { mesh, mesh_name } => {
                     self.apply_generated_mesh(mesh, mesh_name.clone());
                     self.meshing_in_progress = false;
@@ -736,7 +1428,8 @@ impl eframe::App for RmshApp {
                         .clicked()
                     {
                         if let Some(mesh) = self.mesh.as_ref() {
-                            let file_name = default_save_name(self.mesh_name.as_deref(), MshSaveFormat::V4);
+                            let file_name =
+                                default_save_name(self.mesh_name.as_deref(), MshSaveFormat::V4);
                             request_save_dialog(mesh.clone(), file_name, MshSaveFormat::V4);
                         }
                         ui.close_menu();
@@ -746,7 +1439,8 @@ impl eframe::App for RmshApp {
                         .clicked()
                     {
                         if let Some(mesh) = self.mesh.as_ref() {
-                            let file_name = default_save_name(self.mesh_name.as_deref(), MshSaveFormat::V2);
+                            let file_name =
+                                default_save_name(self.mesh_name.as_deref(), MshSaveFormat::V2);
                             request_save_dialog(mesh.clone(), file_name, MshSaveFormat::V2);
                         }
                         ui.close_menu();
@@ -757,92 +1451,25 @@ impl eframe::App for RmshApp {
                 });
 
                 ui.menu_button("Meshing", |ui| {
-                    ui.menu_button("2D Meshing", |ui| {
-                        ui.label("Target edge length");
+                    if ui.button("Meshing Setup...").clicked() {
+                        self.open_meshing_dialog();
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    ui.small("Configure algorithm and parameters in the meshing dialog.");
+                    if self.meshing_in_progress {
+                        ui.separator();
                         ui.add(
-                            egui::DragValue::new(&mut self.meshing_size)
-                                .range(0.001..=1.0e6)
-                                .speed(0.01),
+                            egui::ProgressBar::new(self.meshing_progress)
+                                .show_percentage()
+                                .text(&self.meshing_message),
                         );
-
-                        ui.separator();
-                        let is_face_selected = matches!(self.topo_selection, Some(GSelection::Face(_)));
-                        if !self.source_is_step {
-                            ui.small("Load a STEP model to enable 2D meshing.");
-                        } else if !is_face_selected {
-                            ui.small("Select one face in the Topology panel first.");
-                        }
-
-                        let can_start = self.source_is_step
-                            && is_face_selected
-                            && !self.meshing_in_progress
-                            && self.meshing_size > 0.0;
-
-                        if ui
-                            .add_enabled(can_start, egui::Button::new("Triangulate Selected Face"))
-                            .clicked()
-                        {
-                            self.start_2d_meshing(ctx);
-                            ui.close_menu();
-                        }
-
-                        if self.meshing_in_progress {
-                            ui.separator();
-                            ui.add(
-                                egui::ProgressBar::new(self.meshing_progress)
-                                    .show_percentage()
-                                    .text(&self.meshing_message),
-                            );
-                        }
-                    });
-
-                    ui.menu_button("3D Meshing", |ui| {
-                        ui.small("Generate tetrahedral volume mesh from closed surface.");
-                        ui.separator();
-                        ui.label("Algorithm");
-                        ui.radio_value(
-                            &mut self.meshing_algo_3d,
-                            MeshingAlgo3D::CentroidStar,
-                            MeshingAlgo3D::CentroidStar.label(),
-                        );
-                        ui.radio_value(
-                            &mut self.meshing_algo_3d,
-                            MeshingAlgo3D::Delaunay,
-                            MeshingAlgo3D::Delaunay.label(),
-                        );
-                        ui.separator();
-                        ui.label("Target edge length");
-                        ui.add(
-                            egui::DragValue::new(&mut self.meshing_size_3d)
-                                .range(0.001..=1.0e6)
-                                .speed(0.01),
-                        );
-
-                        let can_start = self.source_is_step && !self.meshing_in_progress;
-                        if !self.source_is_step {
-                            ui.small("Load a STEP model to enable 3D meshing.");
-                        }
-
-                        if ui
-                            .add_enabled(can_start, egui::Button::new("Tetrahedralize Model"))
-                            .clicked()
-                        {
-                            self.start_3d_meshing(ctx);
-                            ui.close_menu();
-                        }
-
-                        if self.meshing_in_progress {
-                            ui.separator();
-                            ui.add(
-                                egui::ProgressBar::new(self.meshing_progress)
-                                    .show_percentage()
-                                    .text(&self.meshing_message),
-                            );
-                        }
-                    });
+                    }
                 });
             });
         });
+
+        self.show_meshing_dialog(ctx);
 
         // Left panel — display controls
         egui::SidePanel::left("controls_panel")
@@ -873,9 +1500,17 @@ impl eframe::App for RmshApp {
                     if let Some(ref render_state) = self.render_state {
                         let renderer = render_state.renderer.read();
                         if let Some(scene) = renderer.callback_resources.get::<Scene>() {
-                            if scene.camera.orthographic { "Perspective" } else { "Orthographic" }
-                        } else { "Orthographic" }
-                    } else { "Orthographic" }
+                            if scene.camera.orthographic {
+                                "Perspective"
+                            } else {
+                                "Orthographic"
+                            }
+                        } else {
+                            "Orthographic"
+                        }
+                    } else {
+                        "Orthographic"
+                    }
                 };
                 if ui.button(proj_label).clicked() {
                     if let Some(ref render_state) = self.render_state {
@@ -888,7 +1523,10 @@ impl eframe::App for RmshApp {
                 ui.separator();
 
                 ui.label("Surface Opacity");
-                ui.add(egui::Slider::new(&mut self.config.surface_opacity, 0.0..=1.0));
+                ui.add(egui::Slider::new(
+                    &mut self.config.surface_opacity,
+                    0.0..=1.0,
+                ));
 
                 ui.separator();
                 if let Some(ref mesh) = self.mesh {
@@ -899,10 +1537,18 @@ impl eframe::App for RmshApp {
                     let dim2 = mesh.elements_by_dimension(2).len();
                     let dim1 = mesh.elements_by_dimension(1).len();
                     let dim0 = mesh.elements_by_dimension(0).len();
-                    if dim3 > 0 { ui.label(format!("  Volume: {}", dim3)); }
-                    if dim2 > 0 { ui.label(format!("  Surface: {}", dim2)); }
-                    if dim1 > 0 { ui.label(format!("  Edge: {}", dim1)); }
-                    if dim0 > 0 { ui.label(format!("  Point: {}", dim0)); }
+                    if dim3 > 0 {
+                        ui.label(format!("  Volume: {}", dim3));
+                    }
+                    if dim2 > 0 {
+                        ui.label(format!("  Surface: {}", dim2));
+                    }
+                    if dim1 > 0 {
+                        ui.label(format!("  Edge: {}", dim1));
+                    }
+                    if dim0 > 0 {
+                        ui.label(format!("  Point: {}", dim0));
+                    }
                 } else {
                     ui.label("No mesh loaded");
                     ui.label("Drag & drop a .msh file");
@@ -1419,12 +2065,34 @@ impl eframe::App for RmshApp {
             }
 
             // Queue custom wgpu rendering
-            let cb = egui_wgpu::Callback::new_paint_callback(
-                rect,
-                ViewportCallback,
-            );
+            let cb = egui_wgpu::Callback::new_paint_callback(rect, ViewportCallback);
             ui.painter().add(cb);
         });
+    }
+}
+
+fn render_mesh_param_editor(ui: &mut egui::Ui, params: &mut MeshParamState, show_limits: bool) {
+    ui.label("Target edge length");
+    ui.add(
+        egui::DragValue::new(&mut params.element_size)
+            .range(0.001..=1.0e6)
+            .speed(0.01),
+    );
+    if show_limits {
+        ui.label("Minimum edge length");
+        ui.add(
+            egui::DragValue::new(&mut params.min_size)
+                .range(0.0001..=1.0e6)
+                .speed(0.01),
+        );
+        ui.label("Maximum edge length");
+        ui.add(
+            egui::DragValue::new(&mut params.max_size)
+                .range(0.0001..=1.0e6)
+                .speed(0.01),
+        );
+        ui.label("Optimize passes");
+        ui.add(egui::DragValue::new(&mut params.optimize_passes).range(0..=100));
     }
 }
 
@@ -1432,11 +2100,16 @@ fn mesh_face_async(
     mesh: &Mesh,
     topo: &Topology,
     face_id: usize,
-    mesh_size: f64,
+    algo: MeshingAlgo2D,
+    params: &MeshParamState,
+    mesh_adapt: &MeshAdapt2DSettings,
+    frontal: &FrontalDelaunay2DSettings,
+    bamg: &Bamg2DSettings,
+    quad: &QuadPaving2DSettings,
     report: &mut dyn FnMut(f32, &str),
 ) -> Result<Mesh, String> {
-    if mesh_size <= 0.0 {
-        return Err("mesh_size must be positive".to_string());
+    if params.element_size <= 0.0 {
+        return Err("element_size must be positive".to_string());
     }
 
     report(0.1, "Preparing selected face");
@@ -1470,7 +2143,6 @@ fn mesh_face_async(
         node_points.push((*nid, node.position));
     }
 
-    // Build a local 2D frame on the selected face plane.
     let p0 = node_points[0].1;
     let mut basis: Option<(Vector3, Vector3)> = None;
     for i in 1..node_points.len() {
@@ -1502,10 +2174,44 @@ fn mesh_face_async(
     })?;
 
     report(0.4, "Extracting boundary loop");
-    let polygon = polygon_from_face(mesh, face, p0, u_axis, v_axis)?;
+    let loop_vertices = face_boundary_loop(mesh, face, p0, u_axis, v_axis)?;
+    let polygon = Polygon2D::new(loop_vertices.clone());
+    let domain = Domain2D::from_outer(loop_vertices);
+    let mesh_params = params.to_mesh_params();
 
-    report(0.65, "Running 2D triangulation");
-    let mut generated = rmsh_algo::mesh_polygon(&polygon, mesh_size).map_err(|e| e.to_string())?;
+    report(0.65, "Running selected 2D algorithm");
+    let mut generated = match algo {
+        MeshingAlgo2D::Delaunay => {
+            rmsh_algo::mesh_polygon(&polygon, params.element_size).map_err(|e| e.to_string())?
+        }
+        MeshingAlgo2D::MeshAdapt => MeshAdapt2D {
+            max_passes: mesh_adapt.max_passes,
+            split_ratio: mesh_adapt.split_ratio,
+            collapse_ratio: mesh_adapt.collapse_ratio,
+        }
+        .mesh_2d(&domain, &mesh_params)
+        .map_err(|e| e.to_string())?,
+        MeshingAlgo2D::FrontalDelaunay => FrontalDelaunay2D {
+            ideal_triangle_angle_deg: frontal.ideal_triangle_angle_deg,
+            front_closure_tol: frontal.front_closure_tol,
+        }
+        .mesh_2d(&domain, &mesh_params)
+        .map_err(|e| e.to_string())?,
+        MeshingAlgo2D::Bamg => Bamg2D {
+            metric_field: None,
+            max_passes: bamg.max_passes,
+            convergence_threshold: bamg.convergence_threshold,
+        }
+        .mesh_2d(&domain, &mesh_params)
+        .map_err(|e| e.to_string())?,
+        MeshingAlgo2D::QuadPaving => QuadPaving2D {
+            strategy: quad.strategy,
+            cross_field_iterations: quad.cross_field_iterations,
+            require_pure_quad: quad.require_pure_quad,
+        }
+        .mesh_2d(&domain, &mesh_params)
+        .map_err(|e| e.to_string())?,
+    };
 
     report(0.85, "Projecting 2D mesh back to 3D");
     for node in generated.nodes.values_mut() {
@@ -1519,13 +2225,55 @@ fn mesh_face_async(
     Ok(generated)
 }
 
-fn polygon_from_face(
+fn mesh_volume_async(
+    mesh: &Mesh,
+    algo: MeshingAlgo3D,
+    params: &MeshParamState,
+    delaunay: &Delaunay3DSettings,
+    frontal: &Frontal3DSettings,
+    hxt: &Hxt3DSettings,
+    mmg: &Mmg3DSettings,
+) -> Result<Mesh, rmsh_algo::MeshAlgoError> {
+    let mesh_params = params.to_mesh_params();
+    match algo {
+        MeshingAlgo3D::CentroidStar => CentroidStarMesher3D.mesh_3d(mesh, &mesh_params),
+        MeshingAlgo3D::Delaunay => Delaunay3D {
+            max_radius_edge_ratio: delaunay.max_radius_edge_ratio,
+            min_dihedral_angle_deg: delaunay.min_dihedral_angle_deg,
+            use_off_center_insertion: delaunay.use_off_center_insertion,
+        }
+        .mesh_3d(mesh, &mesh_params),
+        MeshingAlgo3D::Frontal => Frontal3D {
+            node_reuse_factor: frontal.node_reuse_factor,
+            min_dihedral_angle_deg: frontal.min_dihedral_angle_deg,
+            max_backtrack: frontal.max_backtrack,
+        }
+        .mesh_3d(mesh, &mesh_params),
+        MeshingAlgo3D::Hxt => Hxt3D {
+            num_threads: hxt.num_threads,
+            hilbert_order: hxt.hilbert_order,
+            conflict_buffer_size: hxt.conflict_buffer_size,
+            enable_refinement: hxt.enable_refinement,
+        }
+        .mesh_3d(mesh, &mesh_params),
+        MeshingAlgo3D::Mmg => MmgRemesh {
+            metric_field: None,
+            l_min: mmg.l_min,
+            l_max: mmg.l_max,
+            max_passes: mmg.max_passes,
+            remesh_surface: mmg.remesh_surface,
+        }
+        .mesh_3d(mesh, &mesh_params),
+    }
+}
+
+fn face_boundary_loop(
     mesh: &Mesh,
     face: &rmsh_model::GFace,
     origin: Point3,
     u_axis: Vector3,
     v_axis: Vector3,
-) -> Result<Polygon2D, String> {
+) -> Result<Vec<[f64; 2]>, String> {
     let mut edge_counts: BTreeMap<(u64, u64), usize> = BTreeMap::new();
     for poly in &face.mesh_faces {
         if poly.len() < 2 {
@@ -1573,10 +2321,10 @@ fn polygon_from_face(
             .get(&current)
             .ok_or_else(|| format!("Boundary node {} has no neighbors", current))?;
         let next = match prev {
-            Some(p) => neighbors
+            Some(previous) => neighbors
                 .iter()
                 .copied()
-                .find(|n| *n != p)
+                .find(|n| *n != previous)
                 .ok_or_else(|| format!("Boundary walk failed at node {}", current))?,
             None => neighbors[0],
         };
@@ -1613,7 +2361,7 @@ fn polygon_from_face(
         vertices.push([d.dot(&u_axis), d.dot(&v_axis)]);
     }
 
-    Ok(Polygon2D::new(vertices))
+    Ok(vertices)
 }
 
 fn compute_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
@@ -1646,7 +2394,6 @@ fn handle_camera_input(
     response: &egui::Response,
     ui: &egui::Ui,
 ) -> bool {
-
     let mut needs_repaint = false;
 
     // Rotation — left mouse drag
@@ -1704,9 +2451,13 @@ mod tests {
             .unwrap_or_else(|e| panic!("failed to read {}: {}", step_path.display(), e));
 
         // Simulate viewer load pipeline: STEP -> mesh -> topology classification.
-        let step_mesh = rmsh_io::load_step_from_bytes(&step_bytes).expect("STEP parsing should succeed");
+        let step_mesh =
+            rmsh_io::load_step_from_bytes(&step_bytes).expect("STEP parsing should succeed");
         let topo = rmsh_geo::classify::classify(&step_mesh, 40.0);
-        assert!(!topo.faces.is_empty(), "classified topology should contain faces");
+        assert!(
+            !topo.faces.is_empty(),
+            "classified topology should contain faces"
+        );
 
         // Simulate 3D meshing action from viewer menu.
         let volume_mesh = rmsh_algo::tetrahedralize_closed_surface(&step_mesh)
@@ -1719,14 +2470,16 @@ mod tests {
         // Simulate viewer Save As Gmsh v4 and validate readback.
         let mut v4_bytes = Vec::new();
         rmsh_io::write_msh_v4(&mut v4_bytes, &volume_mesh).expect("MSH v4 write should succeed");
-        let v4_loaded = rmsh_io::load_msh_from_bytes(&v4_bytes).expect("MSH v4 readback should succeed");
+        let v4_loaded =
+            rmsh_io::load_msh_from_bytes(&v4_bytes).expect("MSH v4 readback should succeed");
         assert_eq!(v4_loaded.node_count(), volume_mesh.node_count());
         assert_eq!(v4_loaded.element_count(), volume_mesh.element_count());
 
         // Simulate viewer Save As Gmsh v2 and validate readback.
         let mut v2_bytes = Vec::new();
         rmsh_io::write_msh_v2(&mut v2_bytes, &volume_mesh).expect("MSH v2 write should succeed");
-        let v2_loaded = rmsh_io::load_msh_from_bytes(&v2_bytes).expect("MSH v2 readback should succeed");
+        let v2_loaded =
+            rmsh_io::load_msh_from_bytes(&v2_bytes).expect("MSH v2 readback should succeed");
         assert_eq!(v2_loaded.node_count(), volume_mesh.node_count());
         assert_eq!(v2_loaded.element_count(), volume_mesh.element_count());
     }
@@ -1742,7 +2495,8 @@ mod tests {
         let step_bytes = std::fs::read(&step_path)
             .unwrap_or_else(|e| panic!("failed to read {}: {}", step_path.display(), e));
 
-        let step_mesh = rmsh_io::load_step_from_bytes(&step_bytes).expect("STEP parsing should succeed");
+        let step_mesh =
+            rmsh_io::load_step_from_bytes(&step_bytes).expect("STEP parsing should succeed");
 
         let params = MeshParams::with_size(0.25);
         let mesher = rmsh_algo::CentroidStarMesher3D;
@@ -1753,7 +2507,8 @@ mod tests {
 
         let mut v4_bytes = Vec::new();
         rmsh_io::write_msh_v4(&mut v4_bytes, &volume_mesh).expect("MSH v4 write should succeed");
-        let v4_loaded = rmsh_io::load_msh_from_bytes(&v4_bytes).expect("MSH v4 readback should succeed");
+        let v4_loaded =
+            rmsh_io::load_msh_from_bytes(&v4_bytes).expect("MSH v4 readback should succeed");
         assert_eq!(v4_loaded.node_count(), volume_mesh.node_count());
         assert_eq!(v4_loaded.element_count(), volume_mesh.element_count());
     }
@@ -1769,7 +2524,8 @@ mod tests {
         let step_bytes = std::fs::read(&step_path)
             .unwrap_or_else(|e| panic!("failed to read {}: {}", step_path.display(), e));
 
-        let step_mesh = rmsh_io::load_step_from_bytes(&step_bytes).expect("STEP parsing should succeed");
+        let step_mesh =
+            rmsh_io::load_step_from_bytes(&step_bytes).expect("STEP parsing should succeed");
 
         let params = MeshParams::with_size(0.25);
         let mesher = Delaunay3D::default();
@@ -1780,7 +2536,8 @@ mod tests {
 
         let mut v2_bytes = Vec::new();
         rmsh_io::write_msh_v2(&mut v2_bytes, &volume_mesh).expect("MSH v2 write should succeed");
-        let v2_loaded = rmsh_io::load_msh_from_bytes(&v2_bytes).expect("MSH v2 readback should succeed");
+        let v2_loaded =
+            rmsh_io::load_msh_from_bytes(&v2_bytes).expect("MSH v2 readback should succeed");
         assert_eq!(v2_loaded.node_count(), volume_mesh.node_count());
         assert_eq!(v2_loaded.element_count(), volume_mesh.element_count());
     }
@@ -1795,7 +2552,8 @@ mod tests {
 
         let step_bytes = std::fs::read(&step_path)
             .unwrap_or_else(|e| panic!("failed to read {}: {}", step_path.display(), e));
-        let step_mesh = rmsh_io::load_step_from_bytes(&step_bytes).expect("STEP parsing should succeed");
+        let step_mesh =
+            rmsh_io::load_step_from_bytes(&step_bytes).expect("STEP parsing should succeed");
 
         let mut coarse = MeshParams::with_size(1.0);
         coarse.max_size = 1.2;

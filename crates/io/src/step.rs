@@ -60,7 +60,8 @@ pub fn parse_step(text: &str) -> Result<Mesh, StepError> {
             }
             "EDGE_CURVE" => {
                 if ent.args.len() >= 3 {
-                    if let (Some(v1), Some(v2)) = (parse_ref(&ent.args[1]), parse_ref(&ent.args[2])) {
+                    if let (Some(v1), Some(v2)) = (parse_ref(&ent.args[1]), parse_ref(&ent.args[2]))
+                    {
                         edge_curves.insert(id, (v1, v2));
                     }
                 }
@@ -206,10 +207,18 @@ pub fn parse_step(text: &str) -> Result<Mesh, StepError> {
         }
 
         if face_node_ids.len() == 3 {
-            mesh.add_element(Element::new(next_elem_id, ElementType::Triangle3, face_node_ids));
+            mesh.add_element(Element::new(
+                next_elem_id,
+                ElementType::Triangle3,
+                face_node_ids,
+            ));
             next_elem_id += 1;
         } else if face_node_ids.len() == 4 {
-            mesh.add_element(Element::new(next_elem_id, ElementType::Quad4, face_node_ids));
+            mesh.add_element(Element::new(
+                next_elem_id,
+                ElementType::Quad4,
+                face_node_ids,
+            ));
             next_elem_id += 1;
         } else {
             // Simple fan triangulation for polygonal faces.
@@ -256,7 +265,9 @@ fn parse_entity_statement(raw: &str) -> Result<Option<(i64, Entity)>, StepError>
     }
 
     let Some(eq_pos) = statement.find('=') else {
-        return Err(StepError::Parse(format!("Malformed entity statement: {statement}")));
+        return Err(StepError::Parse(format!(
+            "Malformed entity statement: {statement}"
+        )));
     };
 
     let id_str = statement[1..eq_pos].trim();
@@ -336,7 +347,10 @@ fn parse_step_bool(token: &str) -> Option<bool> {
 
 fn parse_ref_list(token: &str) -> Vec<i64> {
     let t = token.trim();
-    let inner = t.strip_prefix('(').and_then(|v| v.strip_suffix(')')).unwrap_or(t);
+    let inner = t
+        .strip_prefix('(')
+        .and_then(|v| v.strip_suffix(')'))
+        .unwrap_or(t);
     split_top_level_args(inner)
         .into_iter()
         .filter_map(|x| parse_ref(&x))
@@ -345,7 +359,10 @@ fn parse_ref_list(token: &str) -> Vec<i64> {
 
 fn parse_cartesian_coords(token: &str) -> Option<[f64; 3]> {
     let t = token.trim();
-    let inner = t.strip_prefix('(').and_then(|v| v.strip_suffix(')')).unwrap_or(t);
+    let inner = t
+        .strip_prefix('(')
+        .and_then(|v| v.strip_suffix(')'))
+        .unwrap_or(t);
     let coords: Vec<f64> = split_top_level_args(inner)
         .into_iter()
         .filter_map(|x| x.parse::<f64>().ok())

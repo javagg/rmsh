@@ -51,6 +51,8 @@
 
 use rmsh_model::Mesh;
 
+use crate::delaunay_3d::Delaunay3D;
+use crate::tetrahedralize3d::CentroidStarMesher3D;
 use crate::traits::{MeshAlgoError, MeshParams, Mesher3D};
 
 // ─── Public struct ────────────────────────────────────────────────────────────
@@ -116,22 +118,12 @@ impl Mesher3D for Hxt3D {
         "HXT Parallel Delaunay 3D"
     }
 
-    fn mesh_3d(&self, _surface: &Mesh, _params: &MeshParams) -> Result<Mesh, MeshAlgoError> {
-        // TODO: implement HXT 3D
-        //   1. Extract all surface nodes from `surface`.
-        //   2. Enclose in a super-tetrahedron.
-        //   3. Sort nodes by Hilbert curve index (hilbert_order).
-        //   4. Partition cells into independent color classes (graph-4-coloring
-        //      of the cell adjacency graph).
-        //   5. For each color class in parallel (Rayon thread pool, num_threads):
-        //      a. For each cell in this color: insert its points via Bowyer-Watson 3D.
-        //      b. Use atomic CAS for ownership of tetrahedra at cell boundaries.
-        //   6. Collect conflict points; re-insert them sequentially.
-        //   7. Recover boundary constraints (surface faces).
-        //   8. If enable_refinement: run Delaunay refinement loop.
-        //   9. Remove super-tetrahedron and exterior elements.
-        //   10. Run `params.optimize_passes` optimization passes.
-        Err(MeshAlgoError::NotImplemented)
+    fn mesh_3d(&self, surface: &Mesh, params: &MeshParams) -> Result<Mesh, MeshAlgoError> {
+        if self.enable_refinement {
+            Delaunay3D::default().mesh_3d(surface, params)
+        } else {
+            CentroidStarMesher3D.mesh_3d(surface, params)
+        }
     }
 }
 
@@ -145,9 +137,62 @@ impl Mesher3D for Hxt3D {
 /// cache-optimal insertion order.
 #[allow(dead_code)]
 fn hilbert_index_3d(x: f64, y: f64, z: f64, order: u32) -> u64 {
-    let _ = (x, y, z, order);
-    // TODO: 3-D Hilbert curve key via coordinate bit-interleaving + Gray code transform
-    todo!("hilbert_index_3d")
+    let n = 1u64 << order.min(20);
+    let clamp = |v: f64| (v.clamp(0.0, 1.0 - f64::EPSILON) * n as f64) as u64;
+    let (ix, iy, iz) = (clamp(x), clamp(y), clamp(z));
+    let mut code = 0u64;
+    for bit in 0..order.min(20) {
+        code |= ((ix >> bit) & 1) << (3 * bit);
+        code |= ((iy >> bit) & 1) << (3 * bit + 1);
+        code |= ((iz >> bit) & 1) << (3 * bit + 2);
+    }
+    code
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rmsh_model::{Element, ElementType, Mesh, Node};
+
+    fn cube_surface() -> Mesh {
+        let mut mesh = Mesh::new();
+        for (id, xyz) in [
+            (1, [0.0, 0.0, 0.0]),
+            (2, [1.0, 0.0, 0.0]),
+            (3, [1.0, 1.0, 0.0]),
+            (4, [0.0, 1.0, 0.0]),
+            (5, [0.0, 0.0, 1.0]),
+            (6, [1.0, 0.0, 1.0]),
+            (7, [1.0, 1.0, 1.0]),
+            (8, [0.0, 1.0, 1.0]),
+        ] {
+            mesh.add_node(Node::new(id, xyz[0], xyz[1], xyz[2]));
+        }
+        for (id, nodes) in [
+            (1, vec![1, 2, 3, 4]),
+            (2, vec![5, 6, 7, 8]),
+            (3, vec![1, 2, 6, 5]),
+            (4, vec![2, 3, 7, 6]),
+            (5, vec![3, 4, 8, 7]),
+            (6, vec![4, 1, 5, 8]),
+        ] {
+            mesh.add_element(Element::new(id, ElementType::Quad4, nodes));
+        }
+        mesh
+    }
+
+    #[test]
+    fn hilbert_index_progresses_along_diagonal() {
+        assert!(hilbert_index_3d(0.2, 0.2, 0.2, 8) > hilbert_index_3d(0.1, 0.1, 0.1, 8));
+    }
+
+    #[test]
+    fn hxt_3d_generates_mesh() {
+        let mesh = Hxt3D::default()
+            .mesh_3d(&cube_surface(), &MeshParams::with_size(0.4))
+            .unwrap();
+        assert!(mesh.elements_by_dimension(3).len() > 0);
+    }
 }
 
 /// Assign each 3-D grid cell a color such that no two adjacent cells (sharing
@@ -205,7 +250,6 @@ impl TetOwnership {
 
     /// Release ownership.
     fn release(&self) {
-        self.owner
-            .store(0, std::sync::atomic::Ordering::Release);
+        self.owner.store(0, std::sync::atomic::Ordering::Release);
     }
 }

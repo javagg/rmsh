@@ -171,7 +171,10 @@ impl ElementType {
             ElementType::Point1 => 0,
             ElementType::Line2 => 1,
             ElementType::Triangle3 | ElementType::Quad4 => 2,
-            ElementType::Tetrahedron4 | ElementType::Hexahedron8 | ElementType::Prism6 | ElementType::Pyramid5 => 3,
+            ElementType::Tetrahedron4
+            | ElementType::Hexahedron8
+            | ElementType::Prism6
+            | ElementType::Pyramid5 => 3,
             ElementType::Unknown(id) => gmsh_dimension_from_type_id(*id),
         }
     }
@@ -297,11 +300,11 @@ mod tests {
         // Unknown types should infer dimension from Gmsh type ID
         // Gmsh type IDs: 15=point, 1–8,26–28=line, 2–3,9–10,16,20–25,36–51=face, 4–7,11–14,17–19,29–31,90–93,118–119=volume
         assert_eq!(ElementType::Unknown(15).dimension(), 0); // point
-        assert_eq!(ElementType::Unknown(1).dimension(), 1);  // line2
-        assert_eq!(ElementType::Unknown(2).dimension(), 2);  // tri3
-        assert_eq!(ElementType::Unknown(3).dimension(), 2);  // quad4
-        assert_eq!(ElementType::Unknown(4).dimension(), 3);  // tet4
-        assert_eq!(ElementType::Unknown(5).dimension(), 3);  // hex8
+        assert_eq!(ElementType::Unknown(1).dimension(), 1); // line2
+        assert_eq!(ElementType::Unknown(2).dimension(), 2); // tri3
+        assert_eq!(ElementType::Unknown(3).dimension(), 2); // quad4
+        assert_eq!(ElementType::Unknown(4).dimension(), 3); // tet4
+        assert_eq!(ElementType::Unknown(5).dimension(), 3); // hex8
     }
 
     #[test]

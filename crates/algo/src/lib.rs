@@ -1,12 +1,14 @@
-pub use rmsh_io::{parse_msh, MshError};
+pub use rmsh_io::{MshError, parse_msh};
 
 // ─── Existing algorithms ──────────────────────────────────────────────────────
 
 pub mod triangulate2d;
-pub use triangulate2d::{mesh_polygon, triangulate_points, MeshError, Polygon2D};
+pub use triangulate2d::{MeshError, Polygon2D, mesh_polygon, triangulate_points};
+
+pub(crate) mod planar_meshing;
 
 pub mod tetrahedralize3d;
-pub use tetrahedralize3d::{tetrahedralize_closed_surface, CentroidStarMesher3D, Mesh3DError};
+pub use tetrahedralize3d::{CentroidStarMesher3D, Mesh3DError, tetrahedralize_closed_surface};
 
 // ─── Abstract traits ──────────────────────────────────────────────────────────
 
@@ -16,7 +18,7 @@ pub use tetrahedralize3d::{tetrahedralize_closed_surface, CentroidStarMesher3D, 
 /// [`traits::Mesher3D`], or [`traits::MeshOptimizer`].
 pub mod traits;
 pub use traits::{
-    Domain2D, MeshAlgoError, MeshParams, MeshOptimizer, Mesher2D, Mesher3D, OptimizeParams,
+    Domain2D, MeshAlgoError, MeshOptimizer, MeshParams, Mesher2D, Mesher3D, OptimizeParams,
 };
 
 // ─── 2-D surface meshing algorithms ──────────────────────────────────────────
@@ -64,4 +66,3 @@ pub use laplacian_smooth::{LaplacianSmooth, LaplacianVariant};
 /// Mesh quality optimizer: edge swaps, node insertion/collapse, smoothing.
 pub mod mesh_optimize;
 pub use mesh_optimize::{MeshQualityOptimizer, OptimizeConfig, QualityMetric};
-

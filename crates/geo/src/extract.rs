@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use rmsh_model::{Mesh, Topology, GSelection};
-
+use rmsh_model::{GSelection, Mesh, Topology};
 
 /// Extracted surface data ready for rendering.
 pub struct SurfaceData {
@@ -60,19 +59,39 @@ pub fn extract_surface(mesh: &Mesh) -> SurfaceData {
 
     let get_pos = |node_id: u64| -> [f32; 3] {
         let node = &mesh.nodes[&node_id];
-        [node.position.x as f32, node.position.y as f32, node.position.z as f32]
+        [
+            node.position.x as f32,
+            node.position.y as f32,
+            node.position.z as f32,
+        ]
     };
 
     // Add boundary faces from volume elements
     for (_, (face_nodes, count)) in &face_count {
         if *count == 1 {
-            add_face_triangles(&face_nodes, &get_pos, &mut positions, &mut normals, &mut colors, &mut indices, default_color);
+            add_face_triangles(
+                &face_nodes,
+                &get_pos,
+                &mut positions,
+                &mut normals,
+                &mut colors,
+                &mut indices,
+                default_color,
+            );
         }
     }
 
     // Add surface elements
     for elem in &surface_elements {
-        add_face_triangles(&elem.node_ids, &get_pos, &mut positions, &mut normals, &mut colors, &mut indices, default_color);
+        add_face_triangles(
+            &elem.node_ids,
+            &get_pos,
+            &mut positions,
+            &mut normals,
+            &mut colors,
+            &mut indices,
+            default_color,
+        );
     }
 
     SurfaceData {
@@ -102,8 +121,16 @@ pub fn extract_wireframe(mesh: &Mesh, include_dim: &[u8]) -> WireframeData {
                 let na = &mesh.nodes[&a];
                 let nb = &mesh.nodes[&b];
                 let idx = positions.len() as u32;
-                positions.push([na.position.x as f32, na.position.y as f32, na.position.z as f32]);
-                positions.push([nb.position.x as f32, nb.position.y as f32, nb.position.z as f32]);
+                positions.push([
+                    na.position.x as f32,
+                    na.position.y as f32,
+                    na.position.z as f32,
+                ]);
+                positions.push([
+                    nb.position.x as f32,
+                    nb.position.y as f32,
+                    nb.position.z as f32,
+                ]);
                 indices.push(idx);
                 indices.push(idx + 1);
             }
@@ -118,7 +145,13 @@ pub fn extract_points(mesh: &Mesh) -> PointData {
     let positions = mesh
         .nodes
         .values()
-        .map(|n| [n.position.x as f32, n.position.y as f32, n.position.z as f32])
+        .map(|n| {
+            [
+                n.position.x as f32,
+                n.position.y as f32,
+                n.position.z as f32,
+            ]
+        })
         .collect();
     PointData { positions }
 }
@@ -219,7 +252,11 @@ pub fn extract_surface_colored(mesh: &Mesh, topo: &Topology) -> SurfaceData {
 
     let get_pos = |node_id: u64| -> [f32; 3] {
         let node = &mesh.nodes[&node_id];
-        [node.position.x as f32, node.position.y as f32, node.position.z as f32]
+        [
+            node.position.x as f32,
+            node.position.y as f32,
+            node.position.z as f32,
+        ]
     };
 
     let mut positions = Vec::new();
@@ -243,7 +280,15 @@ pub fn extract_surface_colored(mesh: &Mesh, topo: &Topology) -> SurfaceData {
         for (sorted, (face_nodes, count)) in &face_count {
             if *count == 1 {
                 let color = face_color_map.get(sorted).copied().unwrap_or(default_color);
-                add_face_triangles(&face_nodes, &get_pos, &mut positions, &mut normals, &mut out_colors, &mut indices, color);
+                add_face_triangles(
+                    &face_nodes,
+                    &get_pos,
+                    &mut positions,
+                    &mut normals,
+                    &mut out_colors,
+                    &mut indices,
+                    color,
+                );
             }
         }
     }
@@ -252,11 +297,27 @@ pub fn extract_surface_colored(mesh: &Mesh, topo: &Topology) -> SurfaceData {
     for elem in mesh.elements_by_dimension(2) {
         let mut sorted = elem.node_ids.clone();
         sorted.sort();
-        let color = face_color_map.get(&sorted).copied().unwrap_or(default_color);
-        add_face_triangles(&elem.node_ids, &get_pos, &mut positions, &mut normals, &mut out_colors, &mut indices, color);
+        let color = face_color_map
+            .get(&sorted)
+            .copied()
+            .unwrap_or(default_color);
+        add_face_triangles(
+            &elem.node_ids,
+            &get_pos,
+            &mut positions,
+            &mut normals,
+            &mut out_colors,
+            &mut indices,
+            color,
+        );
     }
 
-    SurfaceData { positions, normals, colors: out_colors, indices }
+    SurfaceData {
+        positions,
+        normals,
+        colors: out_colors,
+        indices,
+    }
 }
 
 /// Extract highlight surface and wireframe for a selected geometric entity.
@@ -267,7 +328,11 @@ pub fn extract_highlight(
 ) -> (Option<SurfaceData>, Option<WireframeData>) {
     let get_pos = |node_id: u64| -> [f32; 3] {
         let node = &mesh.nodes[&node_id];
-        [node.position.x as f32, node.position.y as f32, node.position.z as f32]
+        [
+            node.position.x as f32,
+            node.position.y as f32,
+            node.position.z as f32,
+        ]
     };
 
     match *selection {
@@ -279,12 +344,25 @@ pub fn extract_highlight(
                 let mut indices = Vec::new();
                 let dummy = [0.0f32; 3];
                 for face_nodes in &tface.mesh_faces {
-                    add_face_triangles(face_nodes, &get_pos, &mut positions, &mut normals, &mut colors, &mut indices, dummy);
+                    add_face_triangles(
+                        face_nodes,
+                        &get_pos,
+                        &mut positions,
+                        &mut normals,
+                        &mut colors,
+                        &mut indices,
+                        dummy,
+                    );
                 }
                 let surface = if indices.is_empty() {
                     None
                 } else {
-                    Some(SurfaceData { positions, normals, colors, indices })
+                    Some(SurfaceData {
+                        positions,
+                        normals,
+                        colors,
+                        indices,
+                    })
                 };
                 (surface, None)
             } else {
@@ -316,12 +394,17 @@ pub fn extract_highlight(
             if let Some(tregion) = topo.regions.get(id) {
                 // Highlight all boundary faces of this region's elements
                 let elem_ids: HashSet<u64> = tregion.element_ids.iter().copied().collect();
-                let vol_elements: Vec<_> = mesh.elements.iter().filter(|e| elem_ids.contains(&e.id)).collect();
+                let vol_elements: Vec<_> = mesh
+                    .elements
+                    .iter()
+                    .filter(|e| elem_ids.contains(&e.id))
+                    .collect();
 
                 let mut face_count: HashMap<Vec<u64>, (Vec<u64>, usize)> = HashMap::new();
                 for elem in &vol_elements {
                     for face_local in elem.etype.faces() {
-                        let face_nodes: Vec<u64> = face_local.iter().map(|&i| elem.node_ids[i]).collect();
+                        let face_nodes: Vec<u64> =
+                            face_local.iter().map(|&i| elem.node_ids[i]).collect();
                         let mut sorted = face_nodes.clone();
                         sorted.sort();
                         let entry = face_count.entry(sorted).or_insert((face_nodes.clone(), 0));
@@ -336,13 +419,26 @@ pub fn extract_highlight(
                 let dummy = [0.0f32; 3];
                 for (_, (face_nodes, count)) in &face_count {
                     if *count == 1 {
-                        add_face_triangles(face_nodes, &get_pos, &mut positions, &mut normals, &mut colors, &mut indices, dummy);
+                        add_face_triangles(
+                            face_nodes,
+                            &get_pos,
+                            &mut positions,
+                            &mut normals,
+                            &mut colors,
+                            &mut indices,
+                            dummy,
+                        );
                     }
                 }
                 let surface = if indices.is_empty() {
                     None
                 } else {
-                    Some(SurfaceData { positions, normals, colors, indices })
+                    Some(SurfaceData {
+                        positions,
+                        normals,
+                        colors,
+                        indices,
+                    })
                 };
                 (surface, None)
             } else {
