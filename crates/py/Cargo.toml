@@ -11,3 +11,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39", "generate-import-lib"] }
+rmsh-model.workspace = true
+rmsh-io.workspace = true
+rmsh-algo.workspace = true

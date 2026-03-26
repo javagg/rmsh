@@ -602,6 +602,8 @@ fn gmsh_type_id(element_type: ElementType) -> Result<i32, MshError> {
 mod tests {
     use super::*;
     use std::io::Cursor;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn sample_mesh() -> Mesh {
         let mut mesh = Mesh::new();
@@ -644,6 +646,14 @@ mod tests {
             assert_eq!(actual_element.etype, expected_element.etype);
             assert_eq!(actual_element.node_ids, expected_element.node_ids);
         }
+    }
+
+    fn temp_msh_path(stem: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{}_{}_{}.msh", env!("CARGO_PKG_NAME"), stem, unique))
     }
 
     #[test]
@@ -726,5 +736,31 @@ $EndElements
 
         let parsed = parse_msh(Cursor::new(output)).unwrap();
         assert_mesh_core_eq(&parsed, &mesh);
+    }
+
+    #[test]
+    fn test_save_msh_v4_to_path_and_load_msh_from_path_roundtrip() {
+        let mesh = sample_mesh();
+        let path = temp_msh_path("roundtrip_v4");
+
+        save_msh_v4_to_path(&path, &mesh).expect("save_msh_v4_to_path should succeed");
+        let parsed = load_msh_from_path(&path).expect("load_msh_from_path should succeed");
+
+        assert_mesh_core_eq(&parsed, &mesh);
+
+        std::fs::remove_file(&path).expect("temporary msh file should be removable");
+    }
+
+    #[test]
+    fn test_load_msh_from_path_reports_io_error_for_missing_file() {
+        let path = temp_msh_path("missing");
+        let err = load_msh_from_path(&path).expect_err("missing file should return io error");
+
+        match err {
+            MshError::Io(io_err) => {
+                assert_eq!(io_err.kind(), std::io::ErrorKind::NotFound);
+            }
+            other => panic!("expected MshError::Io, got {other:?}"),
+        }
     }
 }

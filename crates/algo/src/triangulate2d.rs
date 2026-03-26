@@ -356,6 +356,24 @@ mod tests {
     }
 
     #[test]
+    fn mesh_polygon_produces_planar_2d_mesh() {
+        let poly = Polygon2D::new(vec![[0.0, 0.0], [2.0, 0.0], [2.0, 1.0], [0.0, 1.0]]);
+        let mesh = mesh_polygon(&poly, 0.4).expect("meshing should succeed");
+
+        assert!(mesh.node_count() > 0);
+        assert!(mesh.element_count() > 0);
+
+        for node in mesh.nodes.values() {
+            assert!(node.position.z.abs() < 1e-12, "2D meshing should keep z=0");
+        }
+
+        for elem in &mesh.elements {
+            assert_eq!(elem.dimension(), 2, "all elements should be 2D");
+            assert_eq!(elem.etype, ElementType::Triangle3);
+        }
+    }
+
+    #[test]
     fn mesh_rejects_bad_inputs() {
         let poly = Polygon2D::new(vec![[0.0, 0.0], [1.0, 0.0]]);
         assert!(mesh_polygon(&poly, 0.5).is_err(), "< 3 vertices must fail");

@@ -6,7 +6,7 @@ members = [
     "crates/algo",
     "crates/renderer",
     "crates/viewer",
-    "crates/rmsh-py",
+    "crates/py",
 ]
 resolver = "2"
 

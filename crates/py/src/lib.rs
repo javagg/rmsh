@@ -1,0 +1,586 @@
+use pyo3::exceptions::PyNotImplementedError;
+use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyTuple};
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::{LazyLock, Mutex};
+
+use rmsh_algo::{CentroidStarMesher3D, MeshParams, Mesher3D, Polygon2D, mesh_polygon};
+use rmsh_model::{Element, Mesh, Node};
+
+macro_rules! stub_pyfunction {
+    ($rust_name:ident, $py_name:literal, $prototype:literal) => {
+        #[pyfunction]
+        #[pyo3(name = $py_name, signature = (*args, **kwargs))]
+        fn $rust_name(
+            args: &pyo3::Bound<'_, PyTuple>,
+            kwargs: Option<&pyo3::Bound<'_, PyDict>>,
+        ) -> pyo3::PyResult<()> {
+            let _ = (args, kwargs);
+            Err(PyNotImplementedError::new_err(format!(
+                "{} is not implemented yet",
+                $prototype
+            )))
+        }
+    };
+}
+
+#[derive(Default)]
+struct RuntimeState {
+    initialized: bool,
+    current_mesh: Option<Mesh>,
+    current_path: Option<PathBuf>,
+    option_numbers: HashMap<String, f64>,
+    option_strings: HashMap<String, String>,
+    option_colors: HashMap<String, (i32, i32, i32, i32)>,
+}
+
+static STATE: LazyLock<Mutex<RuntimeState>> = LazyLock::new(|| Mutex::new(RuntimeState::default()));
+
+fn ensure_initialized(state: &RuntimeState) -> PyResult<()> {
+    if state.initialized {
+        Ok(())
+    } else {
+        Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "rmsh is not initialized; call initialize() first",
+        ))
+    }
+}
+
+fn load_mesh_from_path(path: &PathBuf) -> PyResult<Mesh> {
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase());
+
+    match ext.as_deref() {
+        Some("msh") => rmsh_io::load_msh_from_path(path)
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string())),
+        Some("step") | Some("stp") => rmsh_io::load_step_from_path(path)
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string())),
+        _ => Err(pyo3::exceptions::PyValueError::new_err(
+            "unsupported file extension; expected .msh, .step, or .stp",
+        )),
+    }
+}
+
+fn boundary_loop_from_surface_mesh(mesh: &Mesh) -> PyResult<Vec<[f64; 2]>> {
+    let mut edge_count: HashMap<(u64, u64), usize> = HashMap::new();
+    for e in &mesh.elements {
+        if e.dimension() != 2 || e.node_ids.len() < 3 {
+            continue;
+        }
+        for i in 0..e.node_ids.len() {
+            let a = e.node_ids[i];
+            let b = e.node_ids[(i + 1) % e.node_ids.len()];
+            let key = if a < b { (a, b) } else { (b, a) };
+            *edge_count.entry(key).or_insert(0) += 1;
+        }
+    }
+
+    let boundary_edges: Vec<(u64, u64)> = edge_count
+        .into_iter()
+        .filter_map(|(edge, count)| if count == 1 { Some(edge) } else { None })
+        .collect();
+
+    if boundary_edges.len() < 3 {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "cannot extract boundary loop from current 2D mesh",
+        ));
+    }
+
+    let mut adjacency: HashMap<u64, Vec<u64>> = HashMap::new();
+    for (a, b) in &boundary_edges {
+        adjacency.entry(*a).or_default().push(*b);
+        adjacency.entry(*b).or_default().push(*a);
+    }
+
+    let start = *adjacency.keys().min().ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err("cannot find boundary start node")
+    })?;
+
+    let mut loop_ids = vec![start];
+    let mut visited_edges: HashSet<(u64, u64)> = HashSet::new();
+    let mut prev: Option<u64> = None;
+    let mut current = start;
+
+    for _ in 0..(boundary_edges.len() + 2) {
+        let neighbors = adjacency.get(&current).ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("broken boundary adjacency")
+        })?;
+        let next = neighbors
+            .iter()
+            .copied()
+            .find(|n| Some(*n) != prev)
+            .or_else(|| neighbors.first().copied())
+            .ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("boundary traversal failed")
+            })?;
+
+        let edge_key = if current < next {
+            (current, next)
+        } else {
+            (next, current)
+        };
+        if visited_edges.contains(&edge_key) {
+            break;
+        }
+        visited_edges.insert(edge_key);
+
+        current = next;
+        if current == start {
+            break;
+        }
+        loop_ids.push(current);
+        prev = loop_ids.iter().rev().nth(1).copied();
+    }
+
+    if loop_ids.len() < 3 {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "extracted boundary loop is degenerate",
+        ));
+    }
+
+    let mut polygon = Vec::with_capacity(loop_ids.len());
+    for nid in loop_ids {
+        let node = mesh.nodes.get(&nid).ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("missing node id {}", nid))
+        })?;
+        polygon.push([node.position.x, node.position.y]);
+    }
+    Ok(polygon)
+}
+
+fn merge_meshes(base: &mut Mesh, incoming: &Mesh) {
+    let mut next_node_id = base.nodes.keys().max().copied().unwrap_or(0) + 1;
+    let mut next_elem_id = base.elements.iter().map(|e| e.id).max().unwrap_or(0) + 1;
+
+    let mut node_remap: HashMap<u64, u64> = HashMap::new();
+    for node in incoming.nodes.values() {
+        let new_id = next_node_id;
+        next_node_id += 1;
+        node_remap.insert(node.id, new_id);
+        base.add_node(Node {
+            id: new_id,
+            position: node.position,
+        });
+    }
+
+    for elem in &incoming.elements {
+        let new_nodes: Vec<u64> = elem
+            .node_ids
+            .iter()
+            .filter_map(|nid| node_remap.get(nid).copied())
+            .collect();
+        if new_nodes.len() != elem.node_ids.len() {
+            continue;
+        }
+        let mut new_elem = Element::new(next_elem_id, elem.etype, new_nodes);
+        new_elem.physical_tag = elem.physical_tag;
+        base.add_element(new_elem);
+        next_elem_id += 1;
+    }
+}
+
+fn extract_required<T>(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+    index: usize,
+    kw_names: &[&str],
+    expected: &str,
+) -> PyResult<T>
+where
+    T: for<'a> FromPyObject<'a>,
+{
+    if let Some(kwargs) = kwargs {
+        for name in kw_names {
+            if let Some(value) = kwargs.get_item(name)? {
+                return value.extract::<T>();
+            }
+        }
+    }
+    if index < args.len() {
+        return args.get_item(index)?.extract::<T>();
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(format!(
+        "missing required argument '{}': expected {}",
+        kw_names.first().copied().unwrap_or("arg"),
+        expected
+    )))
+}
+
+fn option_number(state: &RuntimeState, name: &str) -> Option<f64> {
+    state.option_numbers.get(name).copied()
+}
+
+#[pyfunction]
+#[pyo3(name = "initialize", signature = (*args, **kwargs))]
+fn initialize_impl(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+    let _ = (args, kwargs);
+    let mut state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    state.initialized = true;
+    state.current_mesh = None;
+    state.current_path = None;
+    Ok(())
+}
+
+#[pyfunction]
+#[pyo3(name = "finalize", signature = (*args, **kwargs))]
+fn finalize_impl(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+    let _ = (args, kwargs);
+    let mut state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    state.initialized = false;
+    state.current_mesh = None;
+    state.current_path = None;
+    state.option_numbers.clear();
+    state.option_strings.clear();
+    state.option_colors.clear();
+    Ok(())
+}
+
+#[pyfunction]
+#[pyo3(name = "clear", signature = (*args, **kwargs))]
+fn clear_impl(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+    let _ = (args, kwargs);
+    let mut state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    ensure_initialized(&state)?;
+    state.current_mesh = None;
+    state.current_path = None;
+    Ok(())
+}
+
+#[pyfunction]
+#[pyo3(name = "open", signature = (*args, **kwargs))]
+fn open_impl(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+    let file_name: String = extract_required(args, kwargs, 0, &["fileName", "file_name"], "str")?;
+    let path = PathBuf::from(&file_name);
+    let mesh = load_mesh_from_path(&path)?;
+
+    let mut state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    ensure_initialized(&state)?;
+    state.current_mesh = Some(mesh);
+    state.current_path = Some(path);
+    Ok(())
+}
+
+#[pyfunction]
+#[pyo3(name = "merge", signature = (*args, **kwargs))]
+fn merge_impl(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+    let file_name: String = extract_required(args, kwargs, 0, &["fileName", "file_name"], "str")?;
+    let path = PathBuf::from(&file_name);
+    let incoming = load_mesh_from_path(&path)?;
+
+    let mut state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    ensure_initialized(&state)?;
+
+    match state.current_mesh.as_mut() {
+        Some(current) => merge_meshes(current, &incoming),
+        None => state.current_mesh = Some(incoming),
+    }
+    Ok(())
+}
+
+#[pyfunction]
+#[pyo3(name = "write", signature = (*args, **kwargs))]
+fn write_impl(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+    let file_name: String = extract_required(args, kwargs, 0, &["fileName", "file_name"], "str")?;
+    let path = PathBuf::from(&file_name);
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase());
+
+    let state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    ensure_initialized(&state)?;
+    let mesh = state.current_mesh.as_ref().ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err("no mesh loaded; call open() or generate() first")
+    })?;
+
+    match ext.as_deref() {
+        Some("msh") => rmsh_io::save_msh_v4_to_path(&path, mesh)
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?,
+        _ => {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "unsupported write format; only .msh is currently supported",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[pyfunction]
+#[pyo3(name = "option_set_number", signature = (*args, **kwargs))]
+fn option_set_number_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<()> {
+    let name: String = extract_required(args, kwargs, 0, &["name"], "str")?;
+    let value: f64 = extract_required(args, kwargs, 1, &["value"], "float")?;
+    let mut state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    state.option_numbers.insert(name, value);
+    Ok(())
+}
+
+#[pyfunction]
+#[pyo3(name = "option_get_number", signature = (*args, **kwargs))]
+fn option_get_number_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<f64> {
+    let name: String = extract_required(args, kwargs, 0, &["name"], "str")?;
+    let state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    state.option_numbers.get(&name).copied().ok_or_else(|| {
+        pyo3::exceptions::PyKeyError::new_err(format!("number option not set: {}", name))
+    })
+}
+
+#[pyfunction]
+#[pyo3(name = "option_set_string", signature = (*args, **kwargs))]
+fn option_set_string_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<()> {
+    let name: String = extract_required(args, kwargs, 0, &["name"], "str")?;
+    let value: String = extract_required(args, kwargs, 1, &["value"], "str")?;
+    let mut state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    state.option_strings.insert(name, value);
+    Ok(())
+}
+
+#[pyfunction]
+#[pyo3(name = "option_get_string", signature = (*args, **kwargs))]
+fn option_get_string_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<String> {
+    let name: String = extract_required(args, kwargs, 0, &["name"], "str")?;
+    let state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    state.option_strings.get(&name).cloned().ok_or_else(|| {
+        pyo3::exceptions::PyKeyError::new_err(format!("string option not set: {}", name))
+    })
+}
+
+#[pyfunction]
+#[pyo3(name = "option_set_color", signature = (*args, **kwargs))]
+fn option_set_color_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<()> {
+    let name: String = extract_required(args, kwargs, 0, &["name"], "str")?;
+    let r: i32 = extract_required(args, kwargs, 1, &["r"], "int")?;
+    let g: i32 = extract_required(args, kwargs, 2, &["g"], "int")?;
+    let b: i32 = extract_required(args, kwargs, 3, &["b"], "int")?;
+    let a: i32 = extract_required(args, kwargs, 4, &["a"], "int")?;
+    let mut state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    state.option_colors.insert(name, (r, g, b, a));
+    Ok(())
+}
+
+#[pyfunction]
+#[pyo3(name = "option_get_color", signature = (*args, **kwargs))]
+fn option_get_color_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<(i32, i32, i32, i32)> {
+    let name: String = extract_required(args, kwargs, 0, &["name"], "str")?;
+    let state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    state.option_colors.get(&name).copied().ok_or_else(|| {
+        pyo3::exceptions::PyKeyError::new_err(format!("color option not set: {}", name))
+    })
+}
+
+stub_pyfunction!(logger_start_impl, "logger_start", "rmshLoggerStart(int *ierr)");
+stub_pyfunction!(logger_stop_impl, "logger_stop", "rmshLoggerStop(int *ierr)");
+stub_pyfunction!(logger_get_impl, "logger_get", "rmshLoggerGet(char ***log, size_t *log_n, int *ierr)");
+
+stub_pyfunction!(model_add_impl, "model_add", "rmshModelAdd(const char *name, int *ierr)");
+stub_pyfunction!(model_remove_impl, "model_remove", "rmshModelRemove(int *ierr)");
+stub_pyfunction!(model_get_current_impl, "model_get_current", "rmshModelGetCurrent(char **name, int *ierr)");
+stub_pyfunction!(model_set_current_impl, "model_set_current", "rmshModelSetCurrent(const char *name, int *ierr)");
+stub_pyfunction!(model_get_dimension_impl, "model_get_dimension", "rmshModelGetDimension(int *dim, int *ierr)");
+stub_pyfunction!(model_get_entities_impl, "model_get_entities", "rmshModelGetEntities(int **dimTags, size_t *dimTags_n, int dim, int *ierr)");
+stub_pyfunction!(model_get_entity_name_impl, "model_get_entity_name", "rmshModelGetEntityName(int dim, int tag, char **name, int *ierr)");
+stub_pyfunction!(model_set_entity_name_impl, "model_set_entity_name", "rmshModelSetEntityName(int dim, int tag, const char *name, int *ierr)");
+stub_pyfunction!(model_get_bounding_box_impl, "model_get_bounding_box", "rmshModelGetBoundingBox(int dim, int tag, double *xmin, double *ymin, double *zmin, double *xmax, double *ymax, double *zmax, int *ierr)");
+stub_pyfunction!(model_add_physical_group_impl, "model_add_physical_group", "rmshModelAddPhysicalGroup(int dim, const int *tags, size_t tags_n, int tag, const char *name, int *ierr)");
+stub_pyfunction!(model_get_physical_groups_impl, "model_get_physical_groups", "rmshModelGetPhysicalGroups(int **dimTags, size_t *dimTags_n, int dim, int *ierr)");
+stub_pyfunction!(model_set_physical_name_impl, "model_set_physical_name", "rmshModelSetPhysicalName(int dim, int tag, const char *name, int *ierr)");
+stub_pyfunction!(model_get_physical_name_impl, "model_get_physical_name", "rmshModelGetPhysicalName(int dim, int tag, char **name, int *ierr)");
+
+stub_pyfunction!(model_geo_add_point_impl, "model_geo_add_point", "rmshModelGeoAddPoint(double x, double y, double z, double meshSize, int tag, int *ierr)");
+stub_pyfunction!(model_geo_add_line_impl, "model_geo_add_line", "rmshModelGeoAddLine(int startTag, int endTag, int tag, int *ierr)");
+stub_pyfunction!(model_geo_add_curve_loop_impl, "model_geo_add_curve_loop", "rmshModelGeoAddCurveLoop(const int *curveTags, size_t curveTags_n, int tag, int *ierr)");
+stub_pyfunction!(model_geo_add_plane_surface_impl, "model_geo_add_plane_surface", "rmshModelGeoAddPlaneSurface(const int *wireTags, size_t wireTags_n, int tag, int *ierr)");
+stub_pyfunction!(model_geo_synchronize_impl, "model_geo_synchronize", "rmshModelGeoSynchronize(int *ierr)");
+
+stub_pyfunction!(model_occ_add_box_impl, "model_occ_add_box", "rmshModelOccAddBox(double x, double y, double z, double dx, double dy, double dz, int tag, int *ierr)");
+stub_pyfunction!(model_occ_add_sphere_impl, "model_occ_add_sphere", "rmshModelOccAddSphere(double x, double y, double z, double r, int tag, int *ierr)");
+stub_pyfunction!(model_occ_add_cylinder_impl, "model_occ_add_cylinder", "rmshModelOccAddCylinder(double x, double y, double z, double dx, double dy, double dz, double r, int tag, int *ierr)");
+stub_pyfunction!(model_occ_cut_impl, "model_occ_cut", "rmshModelOccCut(const int *objectDimTags, size_t objectDimTags_n, const int *toolDimTags, size_t toolDimTags_n, int *ierr)");
+stub_pyfunction!(model_occ_fuse_impl, "model_occ_fuse", "rmshModelOccFuse(const int *objectDimTags, size_t objectDimTags_n, const int *toolDimTags, size_t toolDimTags_n, int *ierr)");
+stub_pyfunction!(model_occ_fragment_impl, "model_occ_fragment", "rmshModelOccFragment(const int *objectDimTags, size_t objectDimTags_n, const int *toolDimTags, size_t toolDimTags_n, int *ierr)");
+stub_pyfunction!(model_occ_synchronize_impl, "model_occ_synchronize", "rmshModelOccSynchronize(int *ierr)");
+
+stub_pyfunction!(model_mesh_set_size_impl, "model_mesh_set_size", "rmshModelMeshSetSize(const int *dimTags, size_t dimTags_n, double size, int *ierr)");
+
+#[pyfunction]
+#[pyo3(name = "model_mesh_generate", signature = (*args, **kwargs))]
+fn model_mesh_generate_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<()> {
+    let dim: i32 = extract_required(args, kwargs, 0, &["dim"], "int")?;
+
+    let mut state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    ensure_initialized(&state)?;
+    let surface = state.current_mesh.clone().ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err("no mesh loaded; call open() first")
+    })?;
+
+    let char_len = option_number(&state, "Mesh.CharacteristicLengthMax")
+        .or_else(|| option_number(&state, "Mesh.CharacteristicLengthMin"))
+        .filter(|v| *v > 0.0)
+        .unwrap_or(1.0);
+    let mut params = MeshParams::with_size(char_len);
+    if let Some(v) = option_number(&state, "Mesh.CharacteristicLengthMin") {
+        if v > 0.0 {
+            params.min_size = v;
+        }
+    }
+    if let Some(v) = option_number(&state, "Mesh.CharacteristicLengthMax") {
+        if v > 0.0 {
+            params.max_size = v;
+        }
+    }
+    if params.max_size < params.min_size {
+        std::mem::swap(&mut params.max_size, &mut params.min_size);
+    }
+
+    let generated = if dim == 3 {
+        CentroidStarMesher3D
+            .mesh_3d(&surface, &params)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
+    } else if dim == 2 {
+        let polygon = boundary_loop_from_surface_mesh(&surface)?;
+        mesh_polygon(&Polygon2D::new(polygon), params.element_size)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
+    } else {
+        return Err(PyNotImplementedError::new_err(
+            "only dim=2 and dim=3 are currently implemented",
+        ));
+    };
+    state.current_mesh = Some(generated);
+    Ok(())
+}
+stub_pyfunction!(model_mesh_set_order_impl, "model_mesh_set_order", "rmshModelMeshSetOrder(int order, int *ierr)");
+stub_pyfunction!(model_mesh_get_nodes_impl, "model_mesh_get_nodes", "rmshModelMeshGetNodes(size_t *nodeTags_n, size_t *coord_n, size_t *parametricCoord_n, int dim, int tag, int includeBoundary, int returnParametricCoord, int *ierr)");
+stub_pyfunction!(model_mesh_get_elements_impl, "model_mesh_get_elements", "rmshModelMeshGetElements(size_t *elementTypes_n, size_t *elementTags_n, size_t *nodeTags_n, int dim, int tag, int *ierr)");
+stub_pyfunction!(model_mesh_clear_impl, "model_mesh_clear", "rmshModelMeshClear(const int *dimTags, size_t dimTags_n, int *ierr)");
+stub_pyfunction!(model_mesh_optimize_impl, "model_mesh_optimize", "rmshModelMeshOptimize(const char *method, int force, int niter, const int *dimTags, size_t dimTags_n, int *ierr)");
+stub_pyfunction!(model_mesh_refine_impl, "model_mesh_refine", "rmshModelMeshRefine(int *ierr)");
+stub_pyfunction!(model_mesh_recombine_impl, "model_mesh_recombine", "rmshModelMeshRecombine(int dim, int tag, double angle, int *ierr)");
+
+stub_pyfunction!(plugin_set_number_impl, "plugin_set_number", "rmshPluginSetNumber(const char *name, const char *option, double value, int *ierr)");
+stub_pyfunction!(plugin_set_string_impl, "plugin_set_string", "rmshPluginSetString(const char *name, const char *option, const char *value, int *ierr)");
+stub_pyfunction!(plugin_run_impl, "plugin_run", "rmshPluginRun(const char *name, int *ierr)");
+
+stub_pyfunction!(gui_initialize_impl, "gui_initialize", "rmshGuiInitialize(int *ierr)");
+stub_pyfunction!(gui_run_impl, "gui_run", "rmshGuiRun(int *ierr)");
+stub_pyfunction!(gui_wait_impl, "gui_wait", "rmshGuiWait(double time, int *ierr)");
+
+#[pyo3::pymodule]
+fn _rmsh(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(pyo3::wrap_pyfunction!(initialize_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(finalize_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(clear_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(open_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(merge_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(write_impl, m)?)?;
+
+    m.add_function(pyo3::wrap_pyfunction!(option_set_number_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(option_get_number_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(option_set_string_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(option_get_string_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(option_set_color_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(option_get_color_impl, m)?)?;
+
+    m.add_function(pyo3::wrap_pyfunction!(logger_start_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(logger_stop_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(logger_get_impl, m)?)?;
+
+    m.add_function(pyo3::wrap_pyfunction!(model_add_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_remove_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_get_current_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_set_current_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_get_dimension_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_get_entities_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_get_entity_name_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_set_entity_name_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_get_bounding_box_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_add_physical_group_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_get_physical_groups_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_set_physical_name_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_get_physical_name_impl, m)?)?;
+
+    m.add_function(pyo3::wrap_pyfunction!(model_geo_add_point_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_geo_add_line_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_geo_add_curve_loop_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_geo_add_plane_surface_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_geo_synchronize_impl, m)?)?;
+
+    m.add_function(pyo3::wrap_pyfunction!(model_occ_add_box_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_occ_add_sphere_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_occ_add_cylinder_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_occ_cut_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_occ_fuse_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_occ_fragment_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_occ_synchronize_impl, m)?)?;
+
+    m.add_function(pyo3::wrap_pyfunction!(model_mesh_set_size_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_mesh_generate_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_mesh_set_order_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_mesh_get_nodes_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_mesh_get_elements_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_mesh_clear_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_mesh_optimize_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_mesh_refine_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_mesh_recombine_impl, m)?)?;
+
+    m.add_function(pyo3::wrap_pyfunction!(plugin_set_number_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(plugin_set_string_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(plugin_run_impl, m)?)?;
+
+    m.add_function(pyo3::wrap_pyfunction!(gui_initialize_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(gui_run_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(gui_wait_impl, m)?)?;
+
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    Ok(())
+}
