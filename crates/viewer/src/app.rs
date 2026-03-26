@@ -88,6 +88,7 @@ pub struct RmshApp {
     hidden_edges: HashSet<usize>,
     /// Hidden geometric vertex IDs.
     hidden_vertices: HashSet<usize>,
+    startup_open_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -391,7 +392,23 @@ impl Default for Mmg3DSettings {
 }
 
 impl RmshApp {
+    #[allow(dead_code)]
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        Self::new_with_inputs(cc, None, None)
+    }
+
+    pub fn new_with_startup_path(
+        cc: &eframe::CreationContext<'_>,
+        startup_open_path: Option<PathBuf>,
+    ) -> Self {
+        Self::new_with_inputs(cc, startup_open_path, None)
+    }
+
+    pub fn new_with_inputs(
+        cc: &eframe::CreationContext<'_>,
+        startup_open_path: Option<PathBuf>,
+        initial_mesh: Option<(Mesh, String)>,
+    ) -> Self {
         // Initialize the Scene in the wgpu render state callback resources
         if let Some(render_state) = cc.wgpu_render_state.as_ref() {
             let device = &render_state.device;
@@ -418,7 +435,7 @@ impl RmshApp {
             })
             .unwrap_or_default();
 
-        Self {
+        let mut app = Self {
             mesh: None,
             mesh_name: None,
             config: RenderConfig::default(),
@@ -453,7 +470,14 @@ impl RmshApp {
             hidden_faces: HashSet::new(),
             hidden_edges: HashSet::new(),
             hidden_vertices: HashSet::new(),
+            startup_open_path,
+        };
+
+        if let Some((mesh, mesh_name)) = initial_mesh {
+            app.apply_generated_mesh(mesh, mesh_name);
         }
+
+        app
     }
 
     /// Add a path to the front of the recent-files list (dedup, max 10).
@@ -1327,6 +1351,10 @@ impl eframe::App for RmshApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if let Some(path) = self.startup_open_path.take() {
+            request_open_path(path, self.io_queue.clone(), ctx.clone());
+        }
+
         for event in drain_io_events(&self.io_queue) {
             match event {
                 IoEvent::MeshLoaded {

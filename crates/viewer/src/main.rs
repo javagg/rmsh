@@ -1,26 +1,10 @@
-mod app;
-mod io;
-mod viewport;
-// #[cfg(target_arch = "wasm32")]
-// mod web;
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::PathBuf;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
-    env_logger::init();
-
-    let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1280.0, 800.0])
-            .with_title("rmsh - Finite Element Mesh Viewer"),
-        renderer: eframe::Renderer::Wgpu,
-        ..Default::default()
-    };
-
-    eframe::run_native(
-        "rmsh",
-        native_options,
-        Box::new(|cc| Ok(Box::new(app::RmshApp::new(cc)))),
-    )
+    let startup_path = std::env::args().nth(1).map(PathBuf::from);
+    rmsh_viewer::run_native_viewer(startup_path, None)
 }
 
 // When compiling to web using trunk:

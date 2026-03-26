@@ -4,6 +4,7 @@ use pyo3::types::{PyDict, PyTuple};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
+use std::time::Duration;
 
 use rmsh_algo::{CentroidStarMesher3D, MeshParams, Mesher3D, Polygon2D, mesh_polygon};
 use rmsh_model::{Element, Mesh, Node};
@@ -511,9 +512,61 @@ stub_pyfunction!(plugin_set_number_impl, "plugin_set_number", "rmshPluginSetNumb
 stub_pyfunction!(plugin_set_string_impl, "plugin_set_string", "rmshPluginSetString(const char *name, const char *option, const char *value, int *ierr)");
 stub_pyfunction!(plugin_run_impl, "plugin_run", "rmshPluginRun(const char *name, int *ierr)");
 
-stub_pyfunction!(gui_initialize_impl, "gui_initialize", "rmshGuiInitialize(int *ierr)");
-stub_pyfunction!(gui_run_impl, "gui_run", "rmshGuiRun(int *ierr)");
-stub_pyfunction!(gui_wait_impl, "gui_wait", "rmshGuiWait(double time, int *ierr)");
+#[pyfunction]
+#[pyo3(name = "gui_initialize", signature = (*args, **kwargs))]
+fn gui_initialize_impl(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+    let _ = (args, kwargs);
+    let state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    ensure_initialized(&state)
+}
+
+#[pyfunction]
+#[pyo3(name = "gui_run", signature = (*args, **kwargs))]
+fn gui_run_impl(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<()> {
+    let _ = (args, kwargs);
+
+    let (mesh, mesh_name) = {
+        let state = STATE
+            .lock()
+            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+        ensure_initialized(&state)?;
+        let mesh = state.current_mesh.clone().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("no current model/mesh; call open() or generate() first")
+        })?;
+        let mesh_name = state
+            .current_path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| "rmsh-python-session.msh".to_string());
+        (mesh, mesh_name)
+    };
+
+    py.allow_threads(move || rmsh_viewer::run_native_viewer(None, Some((mesh, mesh_name))))
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+}
+
+#[pyfunction]
+#[pyo3(name = "gui_wait", signature = (*args, **kwargs))]
+fn gui_wait_impl(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+    let timeout: f64 = if args.len() > 0 || kwargs.is_some() {
+        extract_required(args, kwargs, 0, &["time", "timeout"], "float")?
+    } else {
+        0.0
+    };
+
+    if timeout > 0.0 {
+        std::thread::sleep(Duration::from_secs_f64(timeout));
+    }
+    Ok(())
+}
 
 #[pyo3::pymodule]
 fn _rmsh(m: &Bound<'_, PyModule>) -> PyResult<()> {
