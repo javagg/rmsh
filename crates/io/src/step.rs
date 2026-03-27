@@ -357,6 +357,131 @@ fn parse_ref_list(token: &str) -> Vec<i64> {
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// STEP writer – faceted B-Rep
+// ---------------------------------------------------------------------------
+
+/// Write a `Mesh` to disk as a faceted-BREP STEP file (ISO-10303-21).
+pub fn save_step_to_path(path: &Path, mesh: &Mesh) -> Result<(), StepError> {
+    let content = write_step(mesh)?;
+    fs::write(path, content)?;
+    Ok(())
+}
+
+/// Serialize a `Mesh` to a STEP string (faceted-BREP representation).
+pub fn write_step(mesh: &Mesh) -> Result<String, StepError> {
+    use std::collections::HashMap;
+    use std::fmt::Write;
+
+    if mesh.nodes.is_empty() || mesh.elements.is_empty() {
+        return Err(StepError::Parse(
+            "cannot write empty mesh to STEP".to_string(),
+        ));
+    }
+
+    let mut out = String::new();
+    let mut next_id: i64 = 0;
+    let mut id = || {
+        next_id += 1;
+        next_id
+    };
+
+    // ---- Header ----
+    out.push_str("ISO-10303-21;\nHEADER;\n");
+    out.push_str("FILE_DESCRIPTION(('rmsh faceted BREP'),'2;1');\n");
+    out.push_str("FILE_NAME('mesh.step','2026-01-01',(''),(''),'',' rmsh','');\n");
+    out.push_str("FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));\n");
+    out.push_str("ENDSEC;\nDATA;\n");
+
+    // ---- CARTESIAN_POINT & VERTEX_POINT per mesh node ----
+    let mut cp_ids: HashMap<u64, i64> = HashMap::new();
+    let mut vp_ids: HashMap<u64, i64> = HashMap::new();
+
+    for (&nid, node) in &mesh.nodes {
+        let cp = id();
+        cp_ids.insert(nid, cp);
+        let p = &node.position;
+        let _ = writeln!(out, "#{}=CARTESIAN_POINT('',({},{},{}));", cp, p.x, p.y, p.z);
+
+        let vp = id();
+        vp_ids.insert(nid, vp);
+        let _ = writeln!(out, "#{}=VERTEX_POINT('',#{});", vp, cp);
+    }
+
+    // ---- Build faces from 2-D elements (triangles, quads) ----
+    let mut face_ids: Vec<i64> = Vec::new();
+
+    for elem in &mesh.elements {
+        if elem.dimension() < 2 {
+            continue;
+        }
+        let nids = &elem.node_ids;
+        if nids.len() < 3 {
+            continue;
+        }
+
+        // Create one EDGE_CURVE + ORIENTED_EDGE per polygon edge
+        let n = nids.len();
+        let mut oe_ids: Vec<i64> = Vec::with_capacity(n);
+        for i in 0..n {
+            let v_start = nids[i];
+            let v_end = nids[(i + 1) % n];
+            let ec = id();
+            // EDGE_CURVE with a dummy geometry reference ($)
+            let _ = writeln!(
+                out,
+                "#{}=EDGE_CURVE('',#{},#{},$,.T.);",
+                ec, vp_ids[&v_start], vp_ids[&v_end]
+            );
+            let oe = id();
+            let _ = writeln!(out, "#{}=ORIENTED_EDGE('',*,*,#{},.T.);", oe, ec);
+            oe_ids.push(oe);
+        }
+
+        // EDGE_LOOP
+        let el = id();
+        let oe_refs: String = oe_ids.iter().map(|i| format!("#{i}")).collect::<Vec<_>>().join(",");
+        let _ = writeln!(out, "#{}=EDGE_LOOP('',({}));", el, oe_refs);
+
+        // FACE_OUTER_BOUND
+        let fob = id();
+        let _ = writeln!(out, "#{}=FACE_OUTER_BOUND('',#{},.T.);", fob, el);
+
+        // ADVANCED_FACE (with a dummy surface reference $)
+        let face = id();
+        let _ = writeln!(out, "#{}=ADVANCED_FACE('',(#{}),$,.T.);", face, fob);
+        face_ids.push(face);
+    }
+
+    if face_ids.is_empty() {
+        return Err(StepError::Parse(
+            "no 2-D elements to write as STEP faces".to_string(),
+        ));
+    }
+
+    // ---- CLOSED_SHELL ----
+    let shell = id();
+    let face_refs: String = face_ids
+        .iter()
+        .map(|i| format!("#{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let _ = writeln!(out, "#{}=CLOSED_SHELL('',({}));", shell, face_refs);
+
+    // ---- MANIFOLD_SOLID_BREP ----
+    let brep = id();
+    let _ = writeln!(out, "#{}=MANIFOLD_SOLID_BREP('',#{});", brep, shell);
+
+    // ---- Footer ----
+    out.push_str("ENDSEC;\nEND-ISO-10303-21;\n");
+
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// STEP parser helpers
+// ---------------------------------------------------------------------------
+
 fn parse_cartesian_coords(token: &str) -> Option<[f64; 3]> {
     let t = token.trim();
     let inner = t

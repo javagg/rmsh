@@ -1,0 +1,9 @@
+[package]
+name = "rmsh-cad"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rmsh-model = { workspace = true }
+nalgebra = { workspace = true }
+thiserror = { workspace = true }

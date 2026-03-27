@@ -6,7 +6,7 @@ Do not edit manually.
 
 from __future__ import annotations
 
-import _rmsh
+from rmsh import _rmsh
 
 __version__ = getattr(_rmsh, "__version__", "0.0.0")
 

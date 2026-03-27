@@ -7,6 +7,7 @@ use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use rmsh_algo::{CentroidStarMesher3D, MeshParams, Mesher3D, Polygon2D, mesh_polygon};
+use rmsh_cad::Shape;
 use rmsh_model::{Element, Mesh, Node};
 
 macro_rules! stub_pyfunction {
@@ -34,6 +35,10 @@ struct RuntimeState {
     option_numbers: HashMap<String, f64>,
     option_strings: HashMap<String, String>,
     option_colors: HashMap<String, (i32, i32, i32, i32)>,
+    /// CAD shapes created via model.occ.add* functions, keyed by tag.
+    cad_shapes: HashMap<i32, Shape>,
+    /// Next auto-assigned tag for CAD shapes.
+    next_cad_tag: i32,
 }
 
 static STATE: LazyLock<Mutex<RuntimeState>> = LazyLock::new(|| Mutex::new(RuntimeState::default()));
@@ -240,6 +245,8 @@ fn finalize_impl(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) 
     state.option_numbers.clear();
     state.option_strings.clear();
     state.option_colors.clear();
+    state.cad_shapes.clear();
+    state.next_cad_tag = 0;
     Ok(())
 }
 
@@ -253,6 +260,8 @@ fn clear_impl(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> 
     ensure_initialized(&state)?;
     state.current_mesh = None;
     state.current_path = None;
+    state.cad_shapes.clear();
+    state.next_cad_tag = 0;
     Ok(())
 }
 
@@ -312,9 +321,11 @@ fn write_impl(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> 
     match ext.as_deref() {
         Some("msh") => rmsh_io::save_msh_v4_to_path(&path, mesh)
             .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?,
+        Some("step") | Some("stp") => rmsh_io::save_step_to_path(&path, mesh)
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?,
         _ => {
             return Err(pyo3::exceptions::PyValueError::new_err(
-                "unsupported write format; only .msh is currently supported",
+                "unsupported write format; only .msh and .step/.stp are currently supported",
             ));
         }
     }
@@ -439,13 +450,263 @@ stub_pyfunction!(model_geo_add_curve_loop_impl, "model_geo_add_curve_loop", "rms
 stub_pyfunction!(model_geo_add_plane_surface_impl, "model_geo_add_plane_surface", "rmshModelGeoAddPlaneSurface(const int *wireTags, size_t wireTags_n, int tag, int *ierr)");
 stub_pyfunction!(model_geo_synchronize_impl, "model_geo_synchronize", "rmshModelGeoSynchronize(int *ierr)");
 
-stub_pyfunction!(model_occ_add_box_impl, "model_occ_add_box", "rmshModelOccAddBox(double x, double y, double z, double dx, double dy, double dz, int tag, int *ierr)");
-stub_pyfunction!(model_occ_add_sphere_impl, "model_occ_add_sphere", "rmshModelOccAddSphere(double x, double y, double z, double r, int tag, int *ierr)");
-stub_pyfunction!(model_occ_add_cylinder_impl, "model_occ_add_cylinder", "rmshModelOccAddCylinder(double x, double y, double z, double dx, double dy, double dz, double r, int tag, int *ierr)");
-stub_pyfunction!(model_occ_cut_impl, "model_occ_cut", "rmshModelOccCut(const int *objectDimTags, size_t objectDimTags_n, const int *toolDimTags, size_t toolDimTags_n, int *ierr)");
-stub_pyfunction!(model_occ_fuse_impl, "model_occ_fuse", "rmshModelOccFuse(const int *objectDimTags, size_t objectDimTags_n, const int *toolDimTags, size_t toolDimTags_n, int *ierr)");
-stub_pyfunction!(model_occ_fragment_impl, "model_occ_fragment", "rmshModelOccFragment(const int *objectDimTags, size_t objectDimTags_n, const int *toolDimTags, size_t toolDimTags_n, int *ierr)");
-stub_pyfunction!(model_occ_synchronize_impl, "model_occ_synchronize", "rmshModelOccSynchronize(int *ierr)");
+#[pyfunction]
+#[pyo3(name = "model_occ_add_box", signature = (*args, **kwargs))]
+fn model_occ_add_box_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<i32> {
+    let x: f64 = extract_required(args, kwargs, 0, &["x"], "float")?;
+    let y: f64 = extract_required(args, kwargs, 1, &["y"], "float")?;
+    let z: f64 = extract_required(args, kwargs, 2, &["z"], "float")?;
+    let dx: f64 = extract_required(args, kwargs, 3, &["dx"], "float")?;
+    let dy: f64 = extract_required(args, kwargs, 4, &["dy"], "float")?;
+    let dz: f64 = extract_required(args, kwargs, 5, &["dz"], "float")?;
+    let tag: i32 = extract_required(args, kwargs, 6, &["tag"], "int").unwrap_or(-1);
+
+    let mut state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    ensure_initialized(&state)?;
+
+    let shape = rmsh_cad::translate(
+        &rmsh_cad::make_box(dx, dy, dz),
+        rmsh_model::Vector3::new(x, y, z),
+    );
+
+    let assigned_tag = if tag > 0 { tag } else { state.next_cad_tag + 1 };
+    state.next_cad_tag = assigned_tag.max(state.next_cad_tag);
+    state.cad_shapes.insert(assigned_tag, shape);
+    Ok(assigned_tag)
+}
+
+#[pyfunction]
+#[pyo3(name = "model_occ_add_sphere", signature = (*args, **kwargs))]
+fn model_occ_add_sphere_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<i32> {
+    let x: f64 = extract_required(args, kwargs, 0, &["xc", "x"], "float")?;
+    let y: f64 = extract_required(args, kwargs, 1, &["yc", "y"], "float")?;
+    let z: f64 = extract_required(args, kwargs, 2, &["zc", "z"], "float")?;
+    let r: f64 = extract_required(args, kwargs, 3, &["radius", "r"], "float")?;
+    let tag: i32 = extract_required(args, kwargs, 4, &["tag"], "int").unwrap_or(-1);
+
+    let mut state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    ensure_initialized(&state)?;
+
+    let shape = rmsh_cad::make_sphere(rmsh_model::Point3::new(x, y, z), r, 16, 12);
+
+    let assigned_tag = if tag > 0 { tag } else { state.next_cad_tag + 1 };
+    state.next_cad_tag = assigned_tag.max(state.next_cad_tag);
+    state.cad_shapes.insert(assigned_tag, shape);
+    Ok(assigned_tag)
+}
+
+#[pyfunction]
+#[pyo3(name = "model_occ_add_cylinder", signature = (*args, **kwargs))]
+fn model_occ_add_cylinder_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<i32> {
+    let x: f64 = extract_required(args, kwargs, 0, &["x"], "float")?;
+    let y: f64 = extract_required(args, kwargs, 1, &["y"], "float")?;
+    let z: f64 = extract_required(args, kwargs, 2, &["z"], "float")?;
+    let dx: f64 = extract_required(args, kwargs, 3, &["dx"], "float")?;
+    let dy: f64 = extract_required(args, kwargs, 4, &["dy"], "float")?;
+    let dz: f64 = extract_required(args, kwargs, 5, &["dz"], "float")?;
+    let r: f64 = extract_required(args, kwargs, 6, &["r"], "float")?;
+    let tag: i32 = extract_required(args, kwargs, 7, &["tag"], "int").unwrap_or(-1);
+
+    let mut state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    ensure_initialized(&state)?;
+
+    let axis = rmsh_model::Vector3::new(dx, dy, dz);
+    let height = axis.norm();
+    if height < 1e-15 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "cylinder axis direction (dx, dy, dz) must be non-zero",
+        ));
+    }
+    let shape = rmsh_cad::make_cylinder(
+        rmsh_model::Point3::new(x, y, z),
+        axis,
+        r,
+        height,
+        16,
+    );
+
+    let assigned_tag = if tag > 0 { tag } else { state.next_cad_tag + 1 };
+    state.next_cad_tag = assigned_tag.max(state.next_cad_tag);
+    state.cad_shapes.insert(assigned_tag, shape);
+    Ok(assigned_tag)
+}
+
+#[pyfunction]
+#[pyo3(name = "model_occ_cut", signature = (*args, **kwargs))]
+fn model_occ_cut_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Vec<(i32, i32)>> {
+    let obj_dim_tags: Vec<(i32, i32)> =
+        extract_required(args, kwargs, 0, &["objectDimTags"], "list of (dim, tag)")?;
+    let tool_dim_tags: Vec<(i32, i32)> =
+        extract_required(args, kwargs, 1, &["toolDimTags"], "list of (dim, tag)")?;
+
+    let mut state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    ensure_initialized(&state)?;
+
+    let deflection = option_number(&state, "Mesh.OccDeflection").unwrap_or(0.1);
+
+    // Collect shapes — use first object as base, apply Cut with each tool
+    let mut result_shape: Option<Shape> = None;
+    for &(_, tag) in &obj_dim_tags {
+        if let Some(s) = state.cad_shapes.get(&tag) {
+            result_shape = Some(s.clone());
+            break;
+        }
+    }
+    let base = result_shape.ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err("no valid object shape found for cut")
+    })?;
+
+    for &(_, tag) in &tool_dim_tags {
+        if let Some(tool) = state.cad_shapes.get(&tag) {
+            let mesh = rmsh_cad::boolean_difference(&base, tool, deflection);
+            // Convert result mesh back to a shape via tessellation round-trip is lossy;
+            // instead store the result mesh directly as current_mesh.
+            state.current_mesh = Some(mesh);
+        }
+    }
+
+    // Remove consumed tools
+    for &(_, tag) in &tool_dim_tags {
+        state.cad_shapes.remove(&tag);
+    }
+
+    let result_tags: Vec<(i32, i32)> = obj_dim_tags.clone();
+    Ok(result_tags)
+}
+
+#[pyfunction]
+#[pyo3(name = "model_occ_fuse", signature = (*args, **kwargs))]
+fn model_occ_fuse_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Vec<(i32, i32)>> {
+    let obj_dim_tags: Vec<(i32, i32)> =
+        extract_required(args, kwargs, 0, &["objectDimTags"], "list of (dim, tag)")?;
+    let tool_dim_tags: Vec<(i32, i32)> =
+        extract_required(args, kwargs, 1, &["toolDimTags"], "list of (dim, tag)")?;
+
+    let mut state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    ensure_initialized(&state)?;
+
+    let deflection = option_number(&state, "Mesh.OccDeflection").unwrap_or(0.1);
+
+    let mut result_shape: Option<Shape> = None;
+    for &(_, tag) in &obj_dim_tags {
+        if let Some(s) = state.cad_shapes.get(&tag) {
+            result_shape = Some(s.clone());
+            break;
+        }
+    }
+    let base = result_shape.ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err("no valid object shape found for fuse")
+    })?;
+
+    for &(_, tag) in &tool_dim_tags {
+        if let Some(tool) = state.cad_shapes.get(&tag) {
+            let mesh = rmsh_cad::boolean_union(&base, tool, deflection);
+            state.current_mesh = Some(mesh);
+        }
+    }
+
+    for &(_, tag) in &tool_dim_tags {
+        state.cad_shapes.remove(&tag);
+    }
+
+    let result_tags: Vec<(i32, i32)> = obj_dim_tags.clone();
+    Ok(result_tags)
+}
+
+#[pyfunction]
+#[pyo3(name = "model_occ_fragment", signature = (*args, **kwargs))]
+fn model_occ_fragment_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Vec<(i32, i32)>> {
+    let obj_dim_tags: Vec<(i32, i32)> =
+        extract_required(args, kwargs, 0, &["objectDimTags"], "list of (dim, tag)")?;
+    let tool_dim_tags: Vec<(i32, i32)> =
+        extract_required(args, kwargs, 1, &["toolDimTags"], "list of (dim, tag)")?;
+
+    let mut state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    ensure_initialized(&state)?;
+
+    let deflection = option_number(&state, "Mesh.OccDeflection").unwrap_or(0.1);
+
+    let mut result_shape: Option<Shape> = None;
+    for &(_, tag) in &obj_dim_tags {
+        if let Some(s) = state.cad_shapes.get(&tag) {
+            result_shape = Some(s.clone());
+            break;
+        }
+    }
+    let base = result_shape.ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err("no valid object shape found for fragment")
+    })?;
+
+    for &(_, tag) in &tool_dim_tags {
+        if let Some(tool) = state.cad_shapes.get(&tag) {
+            let mesh = rmsh_cad::boolean_intersection(&base, tool, deflection);
+            state.current_mesh = Some(mesh);
+        }
+    }
+
+    let mut result_tags: Vec<(i32, i32)> = obj_dim_tags.clone();
+    result_tags.extend(tool_dim_tags.iter().copied());
+    Ok(result_tags)
+}
+
+#[pyfunction]
+#[pyo3(name = "model_occ_synchronize", signature = (*args, **kwargs))]
+fn model_occ_synchronize_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<()> {
+    let _ = (args, kwargs);
+    let mut state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    ensure_initialized(&state)?;
+
+    let deflection = option_number(&state, "Mesh.OccDeflection").unwrap_or(0.1);
+
+    // Tessellate all CAD shapes and merge into current_mesh
+    let tags: Vec<i32> = state.cad_shapes.keys().copied().collect();
+    for tag in tags {
+        if let Some(shape) = state.cad_shapes.get(&tag) {
+            let mesh = rmsh_cad::tessellate(shape, deflection);
+            match state.current_mesh.as_mut() {
+                Some(current) => merge_meshes(current, &mesh),
+                None => state.current_mesh = Some(mesh),
+            }
+        }
+    }
+    state.cad_shapes.clear();
+    Ok(())
+}
 
 stub_pyfunction!(model_mesh_set_size_impl, "model_mesh_set_size", "rmshModelMeshSetSize(const int *dimTags, size_t dimTags_n, double size, int *ierr)");
 

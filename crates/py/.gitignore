@@ -1,0 +1,9 @@
+.venv/
+*.pyc
+*.msh
+*.step
+*.stp
+uv.lock
+__pycache__/
+*.pdb
+*.pyd

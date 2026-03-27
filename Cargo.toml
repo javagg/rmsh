@@ -4,6 +4,7 @@ members = [
     "crates/geo",
     "crates/io",
     "crates/algo",
+    "crates/cad",
     "crates/renderer",
     "crates/viewer",
     "crates/py",
@@ -23,6 +24,7 @@ rmsh-geo = { path = "crates/geo" }
 rmsh-io = { path = "crates/io" }
 rmsh-algo = { path = "crates/algo" }
 rmsh-renderer = { path = "crates/renderer" }
+rmsh-cad = { path = "crates/cad" }
 
 # Math
 nalgebra = { version = "0.33", features = ["serde-serialize"] }
