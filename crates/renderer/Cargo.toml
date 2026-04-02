@@ -6,6 +6,9 @@ edition.workspace = true
 [dependencies]
 rmsh-model = { workspace = true }
 rmsh-geo = {  workspace = true }
+rcad-render = { workspace = true }
+rcad-kernel = { workspace = true }
+glam = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true }
 nalgebra = { workspace = true }

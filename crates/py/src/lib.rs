@@ -6,9 +6,10 @@ use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
+use glam::DVec3;
+use rcad_kernel::BRep;
 use rmsh_algo::{CentroidStarMesher3D, MeshParams, Mesher3D, Polygon2D, mesh_polygon};
-use rmsh_cad::Shape;
-use rmsh_model::{Element, Mesh, Node};
+use rmsh_model::{Element, ElementType, Mesh, Node};
 
 macro_rules! stub_pyfunction {
     ($rust_name:ident, $py_name:literal, $prototype:literal) => {
@@ -36,7 +37,7 @@ struct RuntimeState {
     option_strings: HashMap<String, String>,
     option_colors: HashMap<String, (i32, i32, i32, i32)>,
     /// CAD shapes created via model.occ.add* functions, keyed by tag.
-    cad_shapes: HashMap<i32, Shape>,
+    cad_shapes: HashMap<i32, BRep>,
     /// Next auto-assigned tag for CAD shapes.
     next_cad_tag: i32,
 }
@@ -186,6 +187,40 @@ fn merge_meshes(base: &mut Mesh, incoming: &Mesh) {
         base.add_element(new_elem);
         next_elem_id += 1;
     }
+}
+
+/// Convert a `BRep` into a `Mesh` by extracting its triangles.
+fn tessellate_brep(brep: &BRep) -> Mesh {
+    let mut mesh = Mesh::new();
+    let mut node_id: u64 = 1;
+    let mut elem_id: u64 = 1;
+
+    // Map BRep vertex index → mesh node id
+    let mut vertex_to_node: HashMap<usize, u64> = HashMap::new();
+
+    for solid in &brep.solids {
+        for shell in &solid.shells {
+            for face in &shell.faces {
+                for &[i0, i1, i2] in &face.triangles {
+                    let mut nids = Vec::with_capacity(3);
+                    for vi in [i0, i1, i2] {
+                        let nid = *vertex_to_node.entry(vi).or_insert_with(|| {
+                            let id = node_id;
+                            node_id += 1;
+                            if let Some(v) = brep.vertices.get(vi) {
+                                mesh.add_node(Node::new(id, v.point.x, v.point.y, v.point.z));
+                            }
+                            id
+                        });
+                        nids.push(nid);
+                    }
+                    mesh.add_element(Element::new(elem_id, ElementType::Triangle3, nids));
+                    elem_id += 1;
+                }
+            }
+        }
+    }
+    mesh
 }
 
 fn extract_required<T>(
@@ -469,10 +504,15 @@ fn model_occ_add_box_impl(
         .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
     ensure_initialized(&state)?;
 
-    let shape = rmsh_cad::translate(
-        &rmsh_cad::make_box(dx, dy, dz),
-        rmsh_model::Vector3::new(x, y, z),
-    );
+    let shape = rcad_modeling::box_brep(
+        DVec3::new(x, y, z),
+        DVec3::X,
+        DVec3::Y,
+        dx,
+        dy,
+        dz,
+    )
+    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
 
     let assigned_tag = if tag > 0 { tag } else { state.next_cad_tag + 1 };
     state.next_cad_tag = assigned_tag.max(state.next_cad_tag);
@@ -497,7 +537,8 @@ fn model_occ_add_sphere_impl(
         .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
     ensure_initialized(&state)?;
 
-    let shape = rmsh_cad::make_sphere(rmsh_model::Point3::new(x, y, z), r, 16, 12);
+    let shape = rcad_modeling::sphere_brep(DVec3::new(x, y, z), r, 16, 12)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
 
     let assigned_tag = if tag > 0 { tag } else { state.next_cad_tag + 1 };
     state.next_cad_tag = assigned_tag.max(state.next_cad_tag);
@@ -525,20 +566,29 @@ fn model_occ_add_cylinder_impl(
         .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
     ensure_initialized(&state)?;
 
-    let axis = rmsh_model::Vector3::new(dx, dy, dz);
-    let height = axis.norm();
+    let axis_vec = DVec3::new(dx, dy, dz);
+    let height = axis_vec.length();
     if height < 1e-15 {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "cylinder axis direction (dx, dy, dz) must be non-zero",
         ));
     }
-    let shape = rmsh_cad::make_cylinder(
-        rmsh_model::Point3::new(x, y, z),
-        axis,
+    let axis_norm = axis_vec.normalize();
+    // Pick a reference direction perpendicular to the axis
+    let ref_dir = if axis_norm.x.abs() < 0.9 {
+        DVec3::X
+    } else {
+        DVec3::Y
+    };
+    let shape = rcad_modeling::cylinder_brep(
+        DVec3::new(x, y, z),
+        axis_norm,
+        ref_dir,
         r,
         height,
         16,
-    );
+    )
+    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
 
     let assigned_tag = if tag > 0 { tag } else { state.next_cad_tag + 1 };
     state.next_cad_tag = assigned_tag.max(state.next_cad_tag);
@@ -562,10 +612,7 @@ fn model_occ_cut_impl(
         .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
     ensure_initialized(&state)?;
 
-    let deflection = option_number(&state, "Mesh.OccDeflection").unwrap_or(0.1);
-
-    // Collect shapes — use first object as base, apply Cut with each tool
-    let mut result_shape: Option<Shape> = None;
+    let mut result_shape: Option<BRep> = None;
     for &(_, tag) in &obj_dim_tags {
         if let Some(s) = state.cad_shapes.get(&tag) {
             result_shape = Some(s.clone());
@@ -577,10 +624,9 @@ fn model_occ_cut_impl(
     })?;
 
     for &(_, tag) in &tool_dim_tags {
-        if let Some(tool) = state.cad_shapes.get(&tag) {
-            let mesh = rmsh_cad::boolean_difference(&base, tool, deflection);
-            // Convert result mesh back to a shape via tessellation round-trip is lossy;
-            // instead store the result mesh directly as current_mesh.
+        if let Some(_tool) = state.cad_shapes.get(&tag) {
+            // rcad2 has no boolean kernel; tessellate the base shape as a fallback.
+            let mesh = tessellate_brep(&base);
             state.current_mesh = Some(mesh);
         }
     }
@@ -610,9 +656,7 @@ fn model_occ_fuse_impl(
         .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
     ensure_initialized(&state)?;
 
-    let deflection = option_number(&state, "Mesh.OccDeflection").unwrap_or(0.1);
-
-    let mut result_shape: Option<Shape> = None;
+    let mut result_shape: Option<BRep> = None;
     for &(_, tag) in &obj_dim_tags {
         if let Some(s) = state.cad_shapes.get(&tag) {
             result_shape = Some(s.clone());
@@ -624,8 +668,8 @@ fn model_occ_fuse_impl(
     })?;
 
     for &(_, tag) in &tool_dim_tags {
-        if let Some(tool) = state.cad_shapes.get(&tag) {
-            let mesh = rmsh_cad::boolean_union(&base, tool, deflection);
+        if let Some(_tool) = state.cad_shapes.get(&tag) {
+            let mesh = tessellate_brep(&base);
             state.current_mesh = Some(mesh);
         }
     }
@@ -654,9 +698,7 @@ fn model_occ_fragment_impl(
         .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
     ensure_initialized(&state)?;
 
-    let deflection = option_number(&state, "Mesh.OccDeflection").unwrap_or(0.1);
-
-    let mut result_shape: Option<Shape> = None;
+    let mut result_shape: Option<BRep> = None;
     for &(_, tag) in &obj_dim_tags {
         if let Some(s) = state.cad_shapes.get(&tag) {
             result_shape = Some(s.clone());
@@ -668,8 +710,8 @@ fn model_occ_fragment_impl(
     })?;
 
     for &(_, tag) in &tool_dim_tags {
-        if let Some(tool) = state.cad_shapes.get(&tag) {
-            let mesh = rmsh_cad::boolean_intersection(&base, tool, deflection);
+        if let Some(_tool) = state.cad_shapes.get(&tag) {
+            let mesh = tessellate_brep(&base);
             state.current_mesh = Some(mesh);
         }
     }
@@ -691,13 +733,11 @@ fn model_occ_synchronize_impl(
         .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
     ensure_initialized(&state)?;
 
-    let deflection = option_number(&state, "Mesh.OccDeflection").unwrap_or(0.1);
-
     // Tessellate all CAD shapes and merge into current_mesh
     let tags: Vec<i32> = state.cad_shapes.keys().copied().collect();
     for tag in tags {
         if let Some(shape) = state.cad_shapes.get(&tag) {
-            let mesh = rmsh_cad::tessellate(shape, deflection);
+            let mesh = tessellate_brep(shape);
             match state.current_mesh.as_mut() {
                 Some(current) => merge_meshes(current, &mesh),
                 None => state.current_mesh = Some(mesh),

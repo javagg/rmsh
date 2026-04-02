@@ -1,13 +1,9 @@
-use wgpu::util::DeviceExt;
+use rcad_render::{Camera, GizmoRenderer, Tessellator, WgpuRenderer};
+use rcad_kernel::{BRep, Shell, Solid, Vertex, Wire, Face};
+use rmsh_geo::extract::{PointData, SurfaceData, WireframeData};
 
-use crate::camera::OrbitCamera;
-use crate::gizmo::AxisGizmo;
-use crate::mesh_render::{HighlightGpu, MeshPointsGpu, MeshSurfaceGpu, MeshWireframeGpu};
-use crate::pipeline;
-use crate::uniform::ViewUniforms;
-
-// Re-export for use from viewer crate
-pub use crate::mesh_render;
+/// Re-export rcad-render Camera as the orbit camera.
+pub use rcad_render::Camera as OrbitCamera;
 
 /// Rendering configuration — controls what elements are visible.
 #[derive(Debug, Clone)]
@@ -17,9 +13,7 @@ pub struct RenderConfig {
     pub show_faces: bool,
     pub show_volumes: bool,
     pub show_gizmo: bool,
-    /// Surface opacity (0.0 = transparent, 1.0 = opaque)
     pub surface_opacity: f32,
-    /// Background color
     pub bg_color: [f32; 4],
 }
 
@@ -37,107 +31,23 @@ impl Default for RenderConfig {
     }
 }
 
-/// The 3D scene — owns all GPU resources and render state.
-/// This is independent of the UI framework.
+/// The 3D scene — wraps `rcad_render::WgpuRenderer` and bridges rmsh geometry types.
 pub struct Scene {
-    pub camera: OrbitCamera,
+    pub camera: Camera,
     pub config: RenderConfig,
-
-    // GPU resources
-    uniform_buffer: wgpu::Buffer,
-    uniform_bind_group: wgpu::BindGroup,
-
-    mesh_pipeline: wgpu::RenderPipeline,
-    wireframe_pipeline: wgpu::RenderPipeline,
-    point_pipeline: wgpu::RenderPipeline,
-    gizmo_pipeline: wgpu::RenderPipeline,
-    highlight_surface_pipeline: wgpu::RenderPipeline,
-    highlight_wireframe_pipeline: wgpu::RenderPipeline,
-
-    // Gizmo
-    gizmo: AxisGizmo,
-    gizmo_uniform_buffer: wgpu::Buffer,
-    gizmo_bind_group: wgpu::BindGroup,
-
-    // Mesh GPU data
-    pub surface_gpu: Option<MeshSurfaceGpu>,
-    pub wireframe_gpu: Option<MeshWireframeGpu>,
-    pub points_gpu: Option<MeshPointsGpu>,
-
-    // Highlight GPU data (selected topology entity)
-    pub highlight_gpu: Option<HighlightGpu>,
+    pub renderer: WgpuRenderer,
+    pub gizmo: GizmoRenderer,
+    _highlight_clear_pending: bool,
 }
 
 impl Scene {
     pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
-        let bind_group_layout = pipeline::create_uniform_bind_group_layout(device);
-
-        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("view_uniform_buffer"),
-            contents: bytemuck::bytes_of(&ViewUniforms::default()),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-
-        let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("view_bind_group"),
-            layout: &bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
-            }],
-        });
-
-        let gizmo_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("gizmo_uniform_buffer"),
-            contents: bytemuck::bytes_of(&ViewUniforms::default()),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-
-        let gizmo_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("gizmo_bind_group"),
-            layout: &bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: gizmo_uniform_buffer.as_entire_binding(),
-            }],
-        });
-
-        let mesh_pipeline =
-            pipeline::create_mesh_pipeline(device, target_format, &bind_group_layout);
-        let wireframe_pipeline =
-            pipeline::create_wireframe_pipeline(device, target_format, &bind_group_layout);
-        let point_pipeline =
-            pipeline::create_point_pipeline(device, target_format, &bind_group_layout);
-        let gizmo_pipeline =
-            pipeline::create_gizmo_pipeline(device, target_format, &bind_group_layout);
-        let highlight_surface_pipeline =
-            pipeline::create_highlight_surface_pipeline(device, target_format, &bind_group_layout);
-        let highlight_wireframe_pipeline = pipeline::create_highlight_wireframe_pipeline(
-            device,
-            target_format,
-            &bind_group_layout,
-        );
-
-        let gizmo = AxisGizmo::new(device);
-
         Self {
-            camera: OrbitCamera::new(),
+            camera: Camera::new(),
             config: RenderConfig::default(),
-            uniform_buffer,
-            uniform_bind_group,
-            mesh_pipeline,
-            wireframe_pipeline,
-            point_pipeline,
-            gizmo_pipeline,
-            highlight_surface_pipeline,
-            highlight_wireframe_pipeline,
-            gizmo,
-            gizmo_uniform_buffer,
-            gizmo_bind_group,
-            surface_gpu: None,
-            wireframe_gpu: None,
-            points_gpu: None,
-            highlight_gpu: None,
+            renderer: WgpuRenderer::new(device, target_format),
+            gizmo: GizmoRenderer::new(device, target_format),
+            _highlight_clear_pending: false,
         }
     }
 
@@ -145,110 +55,149 @@ impl Scene {
     pub fn upload_mesh(
         &mut self,
         device: &wgpu::Device,
-        surface: &rmsh_geo::extract::SurfaceData,
-        wireframe: &rmsh_geo::extract::WireframeData,
-        points: &rmsh_geo::extract::PointData,
+        surface: &SurfaceData,
+        wireframe: &WireframeData,
+        _points: &PointData,
     ) {
-        self.surface_gpu = MeshSurfaceGpu::from_surface_data(device, surface);
-        self.wireframe_gpu = MeshWireframeGpu::from_wireframe_data(device, wireframe);
-        self.points_gpu = MeshPointsGpu::from_point_data(device, points);
+        let brep = surface_wireframe_to_brep(surface, wireframe);
+        let mesh = Tessellator::tessellate(&brep);
+        self.renderer.upload_mesh(device, &mesh);
     }
 
-    /// Update uniforms on the GPU. Call this before rendering (e.g., in prepare()).
+    /// Upload highlight geometry.
+    pub fn upload_highlight(
+        &mut self,
+        device: &wgpu::Device,
+        surface: Option<&SurfaceData>,
+        wireframe: Option<&WireframeData>,
+    ) {
+        self._highlight_clear_pending = false;
+        let face_mesh = surface.map(|s| {
+            let brep = surface_to_brep(s);
+            Tessellator::tessellate(&brep)
+        });
+        let edge_mesh = wireframe.map(|w| {
+            let brep = wireframe_to_brep(w);
+            Tessellator::tessellate(&brep)
+        });
+        self.renderer.upload_highlights(device, face_mesh.as_ref(), edge_mesh.as_ref());
+    }
+
+    /// Clear highlight.
+    pub fn clear_highlight(&mut self) {
+        // Mark as dirty; actual GPU clear happens on next upload_highlight call.
+        // rcad-render clears highlights when None meshes are passed — but we need
+        // a device reference for that. Store a pending-clear flag instead.
+        self._highlight_clear_pending = true;
+    }
+
+    /// Clear highlight with device (performs immediate GPU buffer clear).
+    pub fn clear_highlight_with_device(&mut self, device: &wgpu::Device) {
+        self.renderer.upload_highlights(device, None, None);
+        self._highlight_clear_pending = false;
+    }
+
+    /// Update camera uniforms (called from egui prepare callback).
     pub fn update_uniforms(&self, queue: &wgpu::Queue, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
         }
         let aspect = width as f32 / height as f32;
-
-        // Main view uniforms
-        let eye = self.camera.eye_position();
-        let view_proj = self.camera.view_projection_matrix(aspect);
-        let uniforms = ViewUniforms {
-            view_proj: view_proj.into(),
-            model: nalgebra::Matrix4::<f32>::identity().into(),
-            camera_pos: [eye.x, eye.y, eye.z, 1.0],
-        };
-        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
-
-        // Gizmo uniforms
-        let gizmo_vp = AxisGizmo::gizmo_view_proj(&self.camera, width as f32, height as f32);
-        let gizmo_uniforms = ViewUniforms {
-            view_proj: gizmo_vp.into(),
-            model: nalgebra::Matrix4::<f32>::identity().into(),
-            camera_pos: [0.0, 0.0, 3.0, 1.0],
-        };
-        queue.write_buffer(
-            &self.gizmo_uniform_buffer,
-            0,
-            bytemuck::bytes_of(&gizmo_uniforms),
-        );
-    }
-
-    // --- Accessors for inline rendering from egui callback ---
-
-    pub fn mesh_pipeline(&self) -> &wgpu::RenderPipeline {
-        &self.mesh_pipeline
-    }
-
-    pub fn wireframe_pipeline(&self) -> &wgpu::RenderPipeline {
-        &self.wireframe_pipeline
-    }
-
-    pub fn point_pipeline(&self) -> &wgpu::RenderPipeline {
-        &self.point_pipeline
-    }
-
-    pub fn gizmo_pipeline(&self) -> &wgpu::RenderPipeline {
-        &self.gizmo_pipeline
-    }
-
-    pub fn uniform_bind_group(&self) -> &wgpu::BindGroup {
-        &self.uniform_bind_group
-    }
-
-    pub fn gizmo_bind_group(&self) -> &wgpu::BindGroup {
-        &self.gizmo_bind_group
-    }
-
-    pub fn gizmo_vertex_buffer(&self) -> &wgpu::Buffer {
-        self.gizmo.vertex_buffer()
-    }
-
-    pub fn gizmo_vertex_count(&self) -> u32 {
-        self.gizmo.vertex_count()
-    }
-
-    pub fn highlight_surface_pipeline(&self) -> &wgpu::RenderPipeline {
-        &self.highlight_surface_pipeline
-    }
-
-    pub fn highlight_wireframe_pipeline(&self) -> &wgpu::RenderPipeline {
-        &self.highlight_wireframe_pipeline
-    }
-
-    /// Upload highlight geometry for a selected topology entity.
-    pub fn upload_highlight(
-        &mut self,
-        device: &wgpu::Device,
-        surface: Option<&rmsh_geo::extract::SurfaceData>,
-        wireframe: Option<&rmsh_geo::extract::WireframeData>,
-    ) {
-        let hl_surface = surface.and_then(|s| MeshSurfaceGpu::from_surface_data(device, s));
-        let hl_wireframe = wireframe.and_then(|w| MeshWireframeGpu::from_wireframe_data(device, w));
-
-        if hl_surface.is_some() || hl_wireframe.is_some() {
-            self.highlight_gpu = Some(HighlightGpu {
-                surface: hl_surface,
-                wireframe: hl_wireframe,
-            });
-        } else {
-            self.highlight_gpu = None;
+        self.renderer.update_camera(queue, &self.camera, aspect);
+        if self.config.show_gizmo {
+            self.gizmo.update(queue, &self.camera, width, height);
         }
     }
 
-    /// Clear highlight.
-    pub fn clear_highlight(&mut self) {
-        self.highlight_gpu = None;
+    /// Draw into an active render pass (called from egui paint callback).
+    pub fn draw_in_render_pass(&self, render_pass: &mut wgpu::RenderPass<'_>) {
+        self.renderer.draw_in_render_pass(render_pass, false);
+        if self.config.show_gizmo {
+            self.gizmo.draw(render_pass);
+        }
+    }
+}
+
+// ── Geometry conversion helpers ───────────────────────────────────────────────
+
+/// Convert SurfaceData + WireframeData into a BRep for rcad-render tessellation.
+fn surface_wireframe_to_brep(surface: &SurfaceData, wireframe: &WireframeData) -> BRep {
+    let vertices: Vec<Vertex> = surface
+        .positions
+        .iter()
+        .map(|p| Vertex {
+            point: glam::DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64),
+        })
+        .collect();
+
+    // Build triangle faces from the surface index buffer
+    let mut triangles: Vec<[usize; 3]> = Vec::new();
+    let idx = &surface.indices;
+    let mut i = 0;
+    while i + 2 < idx.len() {
+        triangles.push([idx[i] as usize, idx[i + 1] as usize, idx[i + 2] as usize]);
+        i += 3;
+    }
+
+    // Build edge list (line_indices are pairs)
+    let mut edges: Vec<rcad_kernel::Edge> = Vec::new();
+    let widx = &wireframe.indices;
+    let mut wi = 0;
+    while wi + 1 < widx.len() {
+        edges.push(rcad_kernel::Edge {
+            start: widx[wi] as usize,
+            end: widx[wi + 1] as usize,
+        });
+        wi += 2;
+    }
+
+    let face = Face {
+        outer_wire: Wire { edges: Vec::new() },
+        inner_wires: Vec::new(),
+        normal: glam::DVec3::Z,
+        triangles,
+    };
+
+    BRep {
+        vertices,
+        edges,
+        solids: vec![Solid {
+            shells: vec![Shell { faces: vec![face] }],
+        }],
+        geom: rcad_kernel::GeomStore::default(),
+    }
+}
+
+fn surface_to_brep(surface: &SurfaceData) -> BRep {
+    let empty_wireframe = WireframeData { positions: Vec::new(), indices: Vec::new() };
+    surface_wireframe_to_brep(surface, &empty_wireframe)
+}
+
+fn wireframe_to_brep(wireframe: &WireframeData) -> BRep {
+    // Build minimal vertex list from wireframe positions
+    let vertices: Vec<Vertex> = wireframe
+        .positions
+        .iter()
+        .map(|p| Vertex {
+            point: glam::DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64),
+        })
+        .collect();
+
+    let mut edges: Vec<rcad_kernel::Edge> = Vec::new();
+    let widx = &wireframe.indices;
+    let mut wi = 0;
+    while wi + 1 < widx.len() {
+        edges.push(rcad_kernel::Edge {
+            start: widx[wi] as usize,
+            end: widx[wi + 1] as usize,
+        });
+        wi += 2;
+    }
+
+    BRep {
+        vertices,
+        edges,
+        solids: Vec::new(),
+        geom: rcad_kernel::GeomStore::default(),
     }
 }

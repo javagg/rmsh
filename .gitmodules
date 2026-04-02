@@ -1,0 +1,3 @@
+[submodule "vendor/rcad2"]
+	path = vendor/rcad2
+	url = https://github.com/javagg/rcad2.git

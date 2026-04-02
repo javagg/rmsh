@@ -4,10 +4,14 @@ members = [
     "crates/geo",
     "crates/io",
     "crates/algo",
-    "crates/cad",
     "crates/renderer",
     "crates/viewer",
     "crates/py",
+    "vendor/rcad2/libs/rcad-kernel",
+    "vendor/rcad2/libs/rcad-modeling",
+    "vendor/rcad2/libs/rcad-algorithms",
+    "vendor/rcad2/libs/rcad-step",
+    "vendor/rcad2/libs/rcad-render",
 ]
 resolver = "2"
 
@@ -24,18 +28,23 @@ rmsh-geo = { path = "crates/geo" }
 rmsh-io = { path = "crates/io" }
 rmsh-algo = { path = "crates/algo" }
 rmsh-renderer = { path = "crates/renderer" }
-rmsh-cad = { path = "crates/cad" }
+rcad-kernel = { path = "vendor/rcad2/libs/rcad-kernel" }
+rcad-modeling = { path = "vendor/rcad2/libs/rcad-modeling" }
+rcad-algorithms = { path = "vendor/rcad2/libs/rcad-algorithms" }
+rcad-step = { path = "vendor/rcad2/libs/rcad-step" }
+rcad-render = { path = "vendor/rcad2/libs/rcad-render" }
 
 # Math
 nalgebra = { version = "0.33", features = ["serde-serialize"] }
+glam = { version = "0.29", features = ["serde"] }
 
 # Graphics
-wgpu = "24"
+wgpu = "27"
 bytemuck = { version = "1", features = ["derive"] }
 
 # UI
-egui = "0.31"
-eframe = { version = "0.31", default-features = false }
+egui = "0.33"
+eframe = { version = "0.33", default-features = false }
 
 # Logging
 log = "0.4"

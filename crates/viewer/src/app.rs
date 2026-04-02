@@ -1414,11 +1414,11 @@ impl eframe::App for RmshApp {
 
         // Menu bar
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
-            egui::menu::bar(ui, |ui| {
+            ui.horizontal(|ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("Open...").clicked() {
                         request_open_dialog(self.io_queue.clone(), ctx.clone());
-                        ui.close_menu();
+                        ui.close();
                     }
                     // Open Recent submenu
                     let recent_files_snapshot = self.recent_files.clone();
@@ -1441,13 +1441,13 @@ impl eframe::App for RmshApp {
                                         self.io_queue.clone(),
                                         ctx.clone(),
                                     );
-                                    ui.close_menu();
+                                    ui.close();
                                 }
                             }
                             ui.separator();
                             if ui.button("Clear Recent Files").clicked() {
                                 self.recent_files.clear();
-                                ui.close_menu();
+                                ui.close();
                             }
                         }
                     });
@@ -1460,7 +1460,7 @@ impl eframe::App for RmshApp {
                                 default_save_name(self.mesh_name.as_deref(), MshSaveFormat::V4);
                             request_save_dialog(mesh.clone(), file_name, MshSaveFormat::V4);
                         }
-                        ui.close_menu();
+                        ui.close();
                     }
                     if ui
                         .add_enabled(self.mesh.is_some(), egui::Button::new("Save As MSH 2.2..."))
@@ -1471,7 +1471,7 @@ impl eframe::App for RmshApp {
                                 default_save_name(self.mesh_name.as_deref(), MshSaveFormat::V2);
                             request_save_dialog(mesh.clone(), file_name, MshSaveFormat::V2);
                         }
-                        ui.close_menu();
+                        ui.close();
                     }
                     if ui.button("Quit").clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -1481,7 +1481,7 @@ impl eframe::App for RmshApp {
                 ui.menu_button("Meshing", |ui| {
                     if ui.button("Meshing Setup...").clicked() {
                         self.open_meshing_dialog();
-                        ui.close_menu();
+                        ui.close();
                     }
                     ui.separator();
                     ui.small("Configure algorithm and parameters in the meshing dialog.");
@@ -1528,7 +1528,7 @@ impl eframe::App for RmshApp {
                     if let Some(ref render_state) = self.render_state {
                         let renderer = render_state.renderer.read();
                         if let Some(scene) = renderer.callback_resources.get::<Scene>() {
-                            if scene.camera.orthographic {
+                            if scene.camera.orthographic() {
                                 "Perspective"
                             } else {
                                 "Orthographic"

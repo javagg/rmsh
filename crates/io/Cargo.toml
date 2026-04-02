@@ -5,5 +5,8 @@ edition.workspace = true
 
 [dependencies]
 rmsh-model = { workspace = true }
+rcad-step = { workspace = true }
+rcad-kernel = { workspace = true }
+glam = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
