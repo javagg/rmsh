@@ -89,6 +89,8 @@ pub struct RmshApp {
     /// Hidden geometric vertex IDs.
     hidden_vertices: HashSet<usize>,
     startup_open_path: Option<PathBuf>,
+    /// The original STEP surface mesh, preserved across re-meshing operations.
+    step_surface_mesh: Option<Mesh>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -471,6 +473,7 @@ impl RmshApp {
             hidden_edges: HashSet::new(),
             hidden_vertices: HashSet::new(),
             startup_open_path,
+            step_surface_mesh: None,
         };
 
         if let Some((mesh, mesh_name)) = initial_mesh {
@@ -516,6 +519,13 @@ impl RmshApp {
                 .map_err(anyhow::Error::from)
                 .or_else(|_| rmsh_io::load_step_from_bytes(data).map_err(anyhow::Error::from))?,
         };
+
+        // Preserve the surface mesh for re-meshing when source is STEP.
+        if self.source_is_step {
+            self.step_surface_mesh = Some(mesh.clone());
+        } else {
+            self.step_surface_mesh = None;
+        }
         self.mesh_info = format!(
             "Nodes: {}  Elements: {}  File: {}",
             mesh.node_count(),
@@ -575,7 +585,9 @@ impl RmshApp {
     fn open_meshing_dialog(&mut self) {
         self.meshing_dialog_open = true;
         self.meshing_dimension =
-            if self.source_is_step && matches!(self.topo_selection, Some(GSelection::Face(_))) {
+            if (self.source_is_step || self.step_surface_mesh.is_some())
+                && matches!(self.topo_selection, Some(GSelection::Face(_)))
+            {
                 MeshingDimension::Surface2D
             } else {
                 MeshingDimension::Volume3D
@@ -594,7 +606,8 @@ impl RmshApp {
             return;
         }
 
-        let Some(mesh) = self.mesh.clone() else {
+        // For 2D face meshing, always use the original STEP surface mesh.
+        let Some(mesh) = self.step_surface_mesh.clone().or_else(|| self.mesh.clone()) else {
             return;
         };
         let Some(topo) = self.topology.clone() else {
@@ -671,7 +684,8 @@ impl RmshApp {
             return;
         }
 
-        let Some(mesh) = self.mesh.clone() else {
+        // Use the preserved STEP surface mesh for re-meshing; fall back to current mesh.
+        let Some(mesh) = self.step_surface_mesh.clone().or_else(|| self.mesh.clone()) else {
             return;
         };
         let algo = self.meshing_algo_3d;
@@ -741,7 +755,7 @@ impl RmshApp {
         if self.meshing_in_progress {
             return Some("Meshing is already running.".to_string());
         }
-        if !self.source_is_step {
+        if !self.source_is_step && self.step_surface_mesh.is_none() {
             return Some("Load a STEP model to enable meshing.".to_string());
         }
         match self.meshing_dimension {
@@ -1480,6 +1494,17 @@ impl eframe::App for RmshApp {
 
                 ui.menu_button("Meshing", |ui| {
                     if ui.button("Meshing Setup...").clicked() {
+                        self.open_meshing_dialog();
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(
+                            self.step_surface_mesh.is_some() && !self.meshing_in_progress,
+                            egui::Button::new("Re-mesh..."),
+                        )
+                        .on_hover_text("Discard current mesh and re-run meshing on the original STEP surface")
+                        .clicked()
+                    {
                         self.open_meshing_dialog();
                         ui.close();
                     }
