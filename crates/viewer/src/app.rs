@@ -1294,7 +1294,7 @@ impl RmshApp {
         let mut renderer = render_state.renderer.write();
         if let Some(scene) = renderer.callback_resources.get_mut::<Scene>() {
             scene.upload_mesh(device, &surface, &wireframe, &points);
-            scene.clear_highlight();
+            scene.clear_highlight(device);
 
             // Fit camera to mesh
             let center = mesh.center();
@@ -1320,17 +1320,17 @@ impl RmshApp {
         };
 
         let Some(mesh) = &self.mesh else {
-            scene.clear_highlight();
+            scene.clear_highlight(device);
             return;
         };
 
         let Some(topo) = &self.topology else {
-            scene.clear_highlight();
+            scene.clear_highlight(device);
             return;
         };
 
         let Some(sel) = &self.topo_selection else {
-            scene.clear_highlight();
+            scene.clear_highlight(device);
             return;
         };
 

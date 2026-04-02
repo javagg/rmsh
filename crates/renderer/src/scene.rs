@@ -37,7 +37,6 @@ pub struct Scene {
     pub config: RenderConfig,
     pub renderer: WgpuRenderer,
     pub gizmo: GizmoRenderer,
-    _highlight_clear_pending: bool,
 }
 
 impl Scene {
@@ -47,7 +46,6 @@ impl Scene {
             config: RenderConfig::default(),
             renderer: WgpuRenderer::new(device, target_format),
             gizmo: GizmoRenderer::new(device, target_format),
-            _highlight_clear_pending: false,
         }
     }
 
@@ -71,7 +69,6 @@ impl Scene {
         surface: Option<&SurfaceData>,
         wireframe: Option<&WireframeData>,
     ) {
-        self._highlight_clear_pending = false;
         let face_mesh = surface.map(|s| {
             let brep = surface_to_brep(s);
             Tessellator::tessellate(&brep)
@@ -83,18 +80,9 @@ impl Scene {
         self.renderer.upload_highlights(device, face_mesh.as_ref(), edge_mesh.as_ref());
     }
 
-    /// Clear highlight.
-    pub fn clear_highlight(&mut self) {
-        // Mark as dirty; actual GPU clear happens on next upload_highlight call.
-        // rcad-render clears highlights when None meshes are passed — but we need
-        // a device reference for that. Store a pending-clear flag instead.
-        self._highlight_clear_pending = true;
-    }
-
-    /// Clear highlight with device (performs immediate GPU buffer clear).
-    pub fn clear_highlight_with_device(&mut self, device: &wgpu::Device) {
+    /// Clear highlight geometry.
+    pub fn clear_highlight(&mut self, device: &wgpu::Device) {
         self.renderer.upload_highlights(device, None, None);
-        self._highlight_clear_pending = false;
     }
 
     /// Update camera uniforms (called from egui prepare callback).
@@ -130,26 +118,15 @@ fn surface_wireframe_to_brep(surface: &SurfaceData, wireframe: &WireframeData) -
         })
         .collect();
 
-    // Build triangle faces from the surface index buffer
-    let mut triangles: Vec<[usize; 3]> = Vec::new();
-    let idx = &surface.indices;
-    let mut i = 0;
-    while i + 2 < idx.len() {
-        triangles.push([idx[i] as usize, idx[i + 1] as usize, idx[i + 2] as usize]);
-        i += 3;
-    }
+    let triangles: Vec<[usize; 3]> = surface.indices
+        .chunks_exact(3)
+        .map(|c| [c[0] as usize, c[1] as usize, c[2] as usize])
+        .collect();
 
-    // Build edge list (line_indices are pairs)
-    let mut edges: Vec<rcad_kernel::Edge> = Vec::new();
-    let widx = &wireframe.indices;
-    let mut wi = 0;
-    while wi + 1 < widx.len() {
-        edges.push(rcad_kernel::Edge {
-            start: widx[wi] as usize,
-            end: widx[wi + 1] as usize,
-        });
-        wi += 2;
-    }
+    let edges: Vec<rcad_kernel::Edge> = wireframe.indices
+        .chunks_exact(2)
+        .map(|c| rcad_kernel::Edge { start: c[0] as usize, end: c[1] as usize })
+        .collect();
 
     let face = Face {
         outer_wire: Wire { edges: Vec::new() },
@@ -174,7 +151,6 @@ fn surface_to_brep(surface: &SurfaceData) -> BRep {
 }
 
 fn wireframe_to_brep(wireframe: &WireframeData) -> BRep {
-    // Build minimal vertex list from wireframe positions
     let vertices: Vec<Vertex> = wireframe
         .positions
         .iter()
@@ -183,16 +159,10 @@ fn wireframe_to_brep(wireframe: &WireframeData) -> BRep {
         })
         .collect();
 
-    let mut edges: Vec<rcad_kernel::Edge> = Vec::new();
-    let widx = &wireframe.indices;
-    let mut wi = 0;
-    while wi + 1 < widx.len() {
-        edges.push(rcad_kernel::Edge {
-            start: widx[wi] as usize,
-            end: widx[wi + 1] as usize,
-        });
-        wi += 2;
-    }
+    let edges: Vec<rcad_kernel::Edge> = wireframe.indices
+        .chunks_exact(2)
+        .map(|c| rcad_kernel::Edge { start: c[0] as usize, end: c[1] as usize })
+        .collect();
 
     BRep {
         vertices,
