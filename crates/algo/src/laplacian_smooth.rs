@@ -287,3 +287,279 @@ fn element_faces(nodes: &[u64]) -> Vec<[u64; 3]> {
 const _: fn() = || {
     let _: fn(&Node) -> [f64; 3] = |n| [n.position.x, n.position.y, n.position.z];
 };
+
+// ─── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rmsh_model::{Element, ElementType, Mesh, Node};
+
+    /// A small flat triangle mesh: 4 nodes, 2 triangles.
+    ///
+    /// ```text
+    /// 3---4
+    /// |\ 2|
+    /// |1\ |
+    /// 1---2
+    /// ```
+    fn two_triangle_mesh() -> Mesh {
+        let mut mesh = Mesh::new();
+        mesh.add_node(Node::new(1, 0.0, 0.0, 0.0));
+        mesh.add_node(Node::new(2, 1.0, 0.0, 0.0));
+        mesh.add_node(Node::new(3, 0.0, 1.0, 0.0));
+        mesh.add_node(Node::new(4, 1.0, 1.0, 0.0));
+        mesh.add_element(Element::new(1, ElementType::Triangle3, vec![1, 2, 3]));
+        mesh.add_element(Element::new(2, ElementType::Triangle3, vec![2, 4, 3]));
+        mesh
+    }
+
+    /// A 3×3 uniform triangle mesh of the unit square.
+    /// Interior nodes can move; corner/edge nodes are boundary-locked.
+    fn uniform_grid_mesh() -> Mesh {
+        let mut mesh = Mesh::new();
+        // 9 nodes in a 3x3 grid
+        let mut nid = 1u64;
+        for j in 0..3 {
+            for i in 0..3 {
+                mesh.add_node(Node::new(nid, i as f64 * 0.5, j as f64 * 0.5, 0.0));
+                nid += 1;
+            }
+        }
+        // node numbering: row-major, id = j*3 + i + 1
+        // row 0: 1,2,3   row 1: 4,5,6   row 2: 7,8,9
+        let tris = [
+            [1u64, 2, 4],
+            [2, 5, 4],
+            [2, 3, 5],
+            [3, 6, 5],
+            [4, 5, 7],
+            [5, 8, 7],
+            [5, 6, 8],
+            [6, 9, 8],
+        ];
+        for (i, tri) in tris.iter().enumerate() {
+            mesh.add_element(Element::new(
+                i as u64 + 1,
+                ElementType::Triangle3,
+                tri.to_vec(),
+            ));
+        }
+        mesh
+    }
+
+    // ── Basic behavior ────────────────────────────────────────────────────────
+
+    #[test]
+    fn smooth_does_not_change_node_count() {
+        let mut mesh = two_triangle_mesh();
+        let n_before = mesh.node_count();
+        LaplacianSmooth::new()
+            .optimize(&mut mesh, &OptimizeParams::default())
+            .expect("smooth should succeed");
+        assert_eq!(mesh.node_count(), n_before);
+    }
+
+    #[test]
+    fn smooth_does_not_change_element_count() {
+        let mut mesh = two_triangle_mesh();
+        let e_before = mesh.element_count();
+        LaplacianSmooth::new()
+            .optimize(&mut mesh, &OptimizeParams::default())
+            .expect("smooth should succeed");
+        assert_eq!(mesh.element_count(), e_before);
+    }
+
+    #[test]
+    fn smooth_does_not_move_boundary_nodes_by_default() {
+        let mut mesh = two_triangle_mesh();
+        // Snapshot all 4 node positions before.
+        let before: std::collections::HashMap<u64, [f64; 3]> = mesh
+            .nodes
+            .iter()
+            .map(|(&id, n)| (id, [n.position.x, n.position.y, n.position.z]))
+            .collect();
+
+        LaplacianSmooth::new()
+            .optimize(&mut mesh, &OptimizeParams::default())
+            .expect("smooth should succeed");
+
+        let boundary = collect_boundary_nodes(&mesh);
+        for id in &boundary {
+            let old = before[id];
+            let new_node = &mesh.nodes[id];
+            let new = [new_node.position.x, new_node.position.y, new_node.position.z];
+            assert_eq!(old, new, "boundary node {id} must not move");
+        }
+    }
+
+    #[test]
+    fn smooth_returns_ok_on_empty_mesh() {
+        let mut mesh = Mesh::new();
+        let result = LaplacianSmooth::new().optimize(&mut mesh, &OptimizeParams::default());
+        assert!(result.is_ok());
+    }
+
+    // ── Uniform variant ───────────────────────────────────────────────────────
+
+    #[test]
+    fn uniform_smooth_name_is_stable() {
+        assert_eq!(LaplacianSmooth::new().name(), "Laplacian Smooth");
+    }
+
+    #[test]
+    fn uniform_smooth_on_regular_grid_converges() {
+        // A regular grid is already at its Laplacian equilibrium.
+        // After smoothing (boundary locked), interior node positions should
+        // change at most a small amount.
+        let mut mesh = uniform_grid_mesh();
+        // Snapshot the interior node (id=5, center of grid).
+        let before = {
+            let n = &mesh.nodes[&5];
+            [n.position.x, n.position.y, n.position.z]
+        };
+        LaplacianSmooth { omega: 1.0, variant: LaplacianVariant::Uniform }
+            .optimize(
+                &mut mesh,
+                &OptimizeParams {
+                    iterations: 20,
+                    tolerance: 1e-12,
+                    move_boundary_nodes: false,
+                },
+            )
+            .expect("smooth should succeed");
+        let after = {
+            let n = &mesh.nodes[&5];
+            [n.position.x, n.position.y, n.position.z]
+        };
+        let disp = {
+            let dx = after[0] - before[0];
+            let dy = after[1] - before[1];
+            let dz = after[2] - before[2];
+            (dx * dx + dy * dy + dz * dz).sqrt()
+        };
+        // Center node of a symmetric uniform grid stays near its initial position.
+        assert!(disp < 0.1, "interior node moved too much: {disp}");
+    }
+
+    #[test]
+    fn uniform_smooth_with_omega_zero_point_five_keeps_nodes_inside_domain() {
+        let mut mesh = two_triangle_mesh();
+        LaplacianSmooth { omega: 0.5, variant: LaplacianVariant::Uniform }
+            .optimize(&mut mesh, &OptimizeParams { iterations: 10, ..Default::default() })
+            .expect("smooth should succeed");
+        // All nodes must stay in or near [0,1]x[0,1] after smoothing.
+        for node in mesh.nodes.values() {
+            assert!(
+                node.position.x >= -0.1 && node.position.x <= 1.1,
+                "x out of range: {}",
+                node.position.x
+            );
+            assert!(
+                node.position.y >= -0.1 && node.position.y <= 1.1,
+                "y out of range: {}",
+                node.position.y
+            );
+        }
+    }
+
+    // ── Unimplemented variants ────────────────────────────────────────────────
+
+    #[test]
+    fn cotangent_variant_returns_not_implemented() {
+        let mut mesh = two_triangle_mesh();
+        let result = LaplacianSmooth::new()
+            .with_variant(LaplacianVariant::Cotangent)
+            .optimize(
+                &mut mesh,
+                &OptimizeParams {
+                    move_boundary_nodes: true, // ensure at least one node is processed
+                    ..Default::default()
+                },
+            );
+        assert!(
+            matches!(result, Err(MeshAlgoError::NotImplemented)),
+            "Cotangent should return NotImplemented"
+        );
+    }
+
+    #[test]
+    fn taubin_variant_returns_not_implemented() {
+        let mut mesh = two_triangle_mesh();
+        let result = LaplacianSmooth::new()
+            .with_variant(LaplacianVariant::Taubin { lambda: 500, mu_milli: -530 })
+            .optimize(
+                &mut mesh,
+                &OptimizeParams {
+                    move_boundary_nodes: true, // ensure at least one node is processed
+                    ..Default::default()
+                },
+            );
+        assert!(
+            matches!(result, Err(MeshAlgoError::NotImplemented)),
+            "Taubin should return NotImplemented"
+        );
+    }
+
+    // ── Internal helpers ──────────────────────────────────────────────────────
+
+    #[test]
+    fn build_node_adjacency_two_triangles() {
+        let mesh = two_triangle_mesh();
+        let adj = build_node_adjacency(&mesh);
+        // Node 3 should be adjacent to 1, 2, and 4 (shared between both tris).
+        let mut n3 = adj[&3].clone();
+        n3.sort();
+        assert_eq!(n3, vec![1, 2, 4]);
+    }
+
+    #[test]
+    fn collect_boundary_nodes_two_triangles() {
+        let mesh = two_triangle_mesh();
+        // In this mesh ALL faces are boundary (each triangle has 3 distinct faces,
+        // and the shared face [2,3] appears in both triangles so it is internal).
+        // Boundary nodes = nodes on boundary faces.
+        let boundary = collect_boundary_nodes(&mesh);
+        // The shared edge between the two tris is [2, 3] (sorted).
+        // All 4 nodes lie on at least one boundary face.
+        assert_eq!(boundary.len(), 4);
+    }
+
+    #[test]
+    fn element_faces_tet4_returns_four_sorted_faces() {
+        let faces = element_faces(&[10, 20, 30, 40]);
+        assert_eq!(faces.len(), 4);
+        // Each face must have its nodes sorted.
+        for f in &faces {
+            let mut s = *f;
+            s.sort_unstable();
+            assert_eq!(*f, s);
+        }
+        // Check specific faces present (sorted [10,20,30], [10,20,40], [10,30,40], [20,30,40]).
+        let expected: std::collections::HashSet<[u64; 3]> = [
+            [10, 20, 30],
+            [10, 20, 40],
+            [10, 30, 40],
+            [20, 30, 40],
+        ]
+        .into();
+        let got: std::collections::HashSet<[u64; 3]> = faces.into_iter().collect();
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn element_faces_tri3_returns_one_sorted_face() {
+        let faces = element_faces(&[5, 3, 7]);
+        assert_eq!(faces.len(), 1);
+        assert_eq!(faces[0], [3, 5, 7]);
+    }
+
+    #[test]
+    fn element_faces_degenerate_fallback() {
+        // 1 node: empty
+        assert!(element_faces(&[1]).is_empty());
+        // 5 nodes: fallback to first 3
+        let faces = element_faces(&[9, 7, 5, 3, 1]);
+        assert_eq!(faces.len(), 1);
+    }
+}

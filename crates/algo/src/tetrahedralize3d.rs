@@ -451,6 +451,193 @@ mod tests {
         }
     }
 
+    // ── P0: Volume conservation ───────────────────────────────────────────────
+
+    /// Sum of absolute tet volumes must equal the bounding volume of the input
+    /// surface.  For a unit cube the enclosed volume is exactly 1.0.
+    #[test]
+    fn output_volume_sum_equals_cube_volume() {
+        let mut surface = Mesh::new();
+        surface.add_node(Node::new(1, 0.0, 0.0, 0.0));
+        surface.add_node(Node::new(2, 1.0, 0.0, 0.0));
+        surface.add_node(Node::new(3, 1.0, 1.0, 0.0));
+        surface.add_node(Node::new(4, 0.0, 1.0, 0.0));
+        surface.add_node(Node::new(5, 0.0, 0.0, 1.0));
+        surface.add_node(Node::new(6, 1.0, 0.0, 1.0));
+        surface.add_node(Node::new(7, 1.0, 1.0, 1.0));
+        surface.add_node(Node::new(8, 0.0, 1.0, 1.0));
+
+        surface.add_element(Element::new(1, ElementType::Quad4, vec![1, 2, 3, 4]));
+        surface.add_element(Element::new(2, ElementType::Quad4, vec![5, 6, 7, 8]));
+        surface.add_element(Element::new(3, ElementType::Quad4, vec![1, 2, 6, 5]));
+        surface.add_element(Element::new(4, ElementType::Quad4, vec![2, 3, 7, 6]));
+        surface.add_element(Element::new(5, ElementType::Quad4, vec![3, 4, 8, 7]));
+        surface.add_element(Element::new(6, ElementType::Quad4, vec![4, 1, 5, 8]));
+
+        let vol_mesh = tetrahedralize_closed_surface(&surface).expect("tetrahedralization failed");
+
+        let total_vol: f64 = vol_mesh
+            .elements
+            .iter()
+            .filter(|e| e.etype == ElementType::Tetrahedron4 && e.node_ids.len() == 4)
+            .map(|e| {
+                let get = |id: u64| -> Point3 {
+                    let n = &vol_mesh.nodes[&id];
+                    Point3::new(n.position.x, n.position.y, n.position.z)
+                };
+                let a = get(e.node_ids[0]);
+                let b = get(e.node_ids[1]);
+                let c = get(e.node_ids[2]);
+                let d = get(e.node_ids[3]);
+                // |V| = |det[b-a, c-a, d-a]| / 6
+                (tetra_signed_volume6(a, b, c, d).abs()) / 6.0
+            })
+            .sum();
+
+        assert!(
+            (total_vol - 1.0).abs() < 1e-9,
+            "total volume should be 1.0, got {total_vol}"
+        );
+    }
+
+    // ── P0: Topology correctness ──────────────────────────────────────────────
+
+    /// Every node in the output mesh must belong to at least one tetrahedron.
+    #[test]
+    fn every_node_used_in_at_least_one_tet() {
+        let mut surface = Mesh::new();
+        surface.add_node(Node::new(1, 0.0, 0.0, 0.0));
+        surface.add_node(Node::new(2, 1.0, 0.0, 0.0));
+        surface.add_node(Node::new(3, 1.0, 1.0, 0.0));
+        surface.add_node(Node::new(4, 0.0, 1.0, 0.0));
+        surface.add_node(Node::new(5, 0.0, 0.0, 1.0));
+        surface.add_node(Node::new(6, 1.0, 0.0, 1.0));
+        surface.add_node(Node::new(7, 1.0, 1.0, 1.0));
+        surface.add_node(Node::new(8, 0.0, 1.0, 1.0));
+        surface.add_element(Element::new(1, ElementType::Quad4, vec![1, 2, 3, 4]));
+        surface.add_element(Element::new(2, ElementType::Quad4, vec![5, 6, 7, 8]));
+        surface.add_element(Element::new(3, ElementType::Quad4, vec![1, 2, 6, 5]));
+        surface.add_element(Element::new(4, ElementType::Quad4, vec![2, 3, 7, 6]));
+        surface.add_element(Element::new(5, ElementType::Quad4, vec![3, 4, 8, 7]));
+        surface.add_element(Element::new(6, ElementType::Quad4, vec![4, 1, 5, 8]));
+
+        let vol_mesh = tetrahedralize_closed_surface(&surface).expect("tetrahedralization failed");
+
+        let used: std::collections::HashSet<u64> = vol_mesh
+            .elements
+            .iter()
+            .flat_map(|e| e.node_ids.iter().copied())
+            .collect();
+
+        for id in vol_mesh.nodes.keys() {
+            assert!(used.contains(id), "node {id} is unreferenced in any element");
+        }
+    }
+
+    /// All tetrahedra must have non-zero volume (no degenerate elements).
+    #[test]
+    fn no_degenerate_tets_in_cube_output() {
+        let mut surface = Mesh::new();
+        surface.add_node(Node::new(1, 0.0, 0.0, 0.0));
+        surface.add_node(Node::new(2, 1.0, 0.0, 0.0));
+        surface.add_node(Node::new(3, 1.0, 1.0, 0.0));
+        surface.add_node(Node::new(4, 0.0, 1.0, 0.0));
+        surface.add_node(Node::new(5, 0.0, 0.0, 1.0));
+        surface.add_node(Node::new(6, 1.0, 0.0, 1.0));
+        surface.add_node(Node::new(7, 1.0, 1.0, 1.0));
+        surface.add_node(Node::new(8, 0.0, 1.0, 1.0));
+        surface.add_element(Element::new(1, ElementType::Quad4, vec![1, 2, 3, 4]));
+        surface.add_element(Element::new(2, ElementType::Quad4, vec![5, 6, 7, 8]));
+        surface.add_element(Element::new(3, ElementType::Quad4, vec![1, 2, 6, 5]));
+        surface.add_element(Element::new(4, ElementType::Quad4, vec![2, 3, 7, 6]));
+        surface.add_element(Element::new(5, ElementType::Quad4, vec![3, 4, 8, 7]));
+        surface.add_element(Element::new(6, ElementType::Quad4, vec![4, 1, 5, 8]));
+
+        let vol_mesh = tetrahedralize_closed_surface(&surface).expect("tetrahedralization failed");
+
+        for e in vol_mesh
+            .elements
+            .iter()
+            .filter(|e| e.etype == ElementType::Tetrahedron4 && e.node_ids.len() == 4)
+        {
+            let get = |id: u64| -> Point3 {
+                let n = &vol_mesh.nodes[&id];
+                Point3::new(n.position.x, n.position.y, n.position.z)
+            };
+            let vol6 = tetra_signed_volume6(
+                get(e.node_ids[0]),
+                get(e.node_ids[1]),
+                get(e.node_ids[2]),
+                get(e.node_ids[3]),
+            )
+            .abs();
+            assert!(
+                vol6 > 1e-14,
+                "element {} is degenerate (vol6 = {vol6})",
+                e.id
+            );
+        }
+    }
+
+    /// The number of output 3D elements must equal 12 for a cube surface
+    /// (6 quad faces × 2 triangles each = 12 boundary triangles).
+    #[test]
+    fn element_count_is_correct_for_cube() {
+        let mut surface = Mesh::new();
+        surface.add_node(Node::new(1, 0.0, 0.0, 0.0));
+        surface.add_node(Node::new(2, 1.0, 0.0, 0.0));
+        surface.add_node(Node::new(3, 1.0, 1.0, 0.0));
+        surface.add_node(Node::new(4, 0.0, 1.0, 0.0));
+        surface.add_node(Node::new(5, 0.0, 0.0, 1.0));
+        surface.add_node(Node::new(6, 1.0, 0.0, 1.0));
+        surface.add_node(Node::new(7, 1.0, 1.0, 1.0));
+        surface.add_node(Node::new(8, 0.0, 1.0, 1.0));
+        surface.add_element(Element::new(1, ElementType::Quad4, vec![1, 2, 3, 4]));
+        surface.add_element(Element::new(2, ElementType::Quad4, vec![5, 6, 7, 8]));
+        surface.add_element(Element::new(3, ElementType::Quad4, vec![1, 2, 6, 5]));
+        surface.add_element(Element::new(4, ElementType::Quad4, vec![2, 3, 7, 6]));
+        surface.add_element(Element::new(5, ElementType::Quad4, vec![3, 4, 8, 7]));
+        surface.add_element(Element::new(6, ElementType::Quad4, vec![4, 1, 5, 8]));
+
+        let vol_mesh = tetrahedralize_closed_surface(&surface).expect("tetrahedralization failed");
+        assert_eq!(
+            vol_mesh.elements_by_dimension(3).len(),
+            12,
+            "cube should produce exactly 12 tetrahedra"
+        );
+    }
+
+    // ── P0: centroid_of_nodes direct tests ────────────────────────────────────
+
+    #[test]
+    fn centroid_of_nodes_computes_correct_value() {
+        let mut mesh = Mesh::new();
+        mesh.add_node(Node::new(1, 0.0, 0.0, 0.0));
+        mesh.add_node(Node::new(2, 2.0, 0.0, 0.0));
+        mesh.add_node(Node::new(3, 0.0, 2.0, 0.0));
+        mesh.add_node(Node::new(4, 0.0, 0.0, 2.0));
+
+        let ids: std::collections::HashSet<u64> = [1, 2, 3, 4].into();
+        let c = centroid_of_nodes(&mesh, &ids).expect("centroid should succeed");
+        assert!((c.x - 0.5).abs() < 1e-12);
+        assert!((c.y - 0.5).abs() < 1e-12);
+        assert!((c.z - 0.5).abs() < 1e-12);
+    }
+
+    // ── P0: tetra_signed_volume6 additional tests ─────────────────────────────
+
+    #[test]
+    fn tetra_signed_volume6_unit_tet_value() {
+        // Unit tet: a=(0,0,0), b=(1,0,0), c=(0,1,0), d=(0,0,1)
+        // Volume = 1/6, so vol6 = 1.0.
+        let a = Point3::new(0.0, 0.0, 0.0);
+        let b = Point3::new(1.0, 0.0, 0.0);
+        let c = Point3::new(0.0, 1.0, 0.0);
+        let d = Point3::new(0.0, 0.0, 1.0);
+        let v = tetra_signed_volume6(a, b, c, d);
+        assert!((v.abs() - 1.0).abs() < 1e-12, "unit tet vol6 should be 1.0, got {v}");
+    }
+
     #[test]
     fn step_mesh_can_be_saved_as_gmsh_v2_and_v4_after_3d_meshing() {
         let step_path = step_file_path("my_cube.step");

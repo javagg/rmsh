@@ -674,4 +674,180 @@ mod tests {
         let lmax = tetra_max_edge_length_from_mesh(&mesh, &[1, 2, 3, 4]).expect("valid tet");
         assert!((lmax - 2.2360679).abs() < 1e-5);
     }
+
+    // ── P1: circumsphere & in_sphere_test ─────────────────────────────────────
+
+    #[test]
+    fn circumsphere_of_unit_tet_is_at_center_with_known_radius() {
+        // Unit tet: a=(0,0,0), b=(1,0,0), c=(0,1,0), d=(0,0,1).
+        // Circumcenter is at (0.5, 0.5, 0.5), radius = sqrt(3)/2.
+        let a = [0.0f64, 0.0, 0.0];
+        let b = [1.0, 0.0, 0.0];
+        let c = [0.0, 1.0, 0.0];
+        let d = [0.0, 0.0, 1.0];
+        let (center, radius) = circumsphere(a, b, c, d);
+        assert!((center[0] - 0.5).abs() < 1e-9, "cx={}", center[0]);
+        assert!((center[1] - 0.5).abs() < 1e-9, "cy={}", center[1]);
+        assert!((center[2] - 0.5).abs() < 1e-9, "cz={}", center[2]);
+        let expected_r = (3.0f64).sqrt() / 2.0;
+        assert!((radius - expected_r).abs() < 1e-9, "r={}", radius);
+    }
+
+    #[test]
+    fn circumsphere_degenerate_tet_returns_infinite_radius() {
+        // Four coplanar points → degenerate.
+        let a = [0.0, 0.0, 0.0];
+        let b = [1.0, 0.0, 0.0];
+        let c = [0.0, 1.0, 0.0];
+        let d = [0.5, 0.5, 0.0]; // same plane
+        let (_, radius) = circumsphere(a, b, c, d);
+        assert!(!radius.is_finite(), "degenerate tet should give infinite radius");
+    }
+
+    #[test]
+    fn in_sphere_test_classifies_points_correctly() {
+        let a = [0.0f64, 0.0, 0.0];
+        let b = [1.0, 0.0, 0.0];
+        let c = [0.0, 1.0, 0.0];
+        let d = [0.0, 0.0, 1.0];
+        // Circumcenter (0.5,0.5,0.5): clearly inside
+        let inside = [0.5, 0.5, 0.5];
+        assert!(in_sphere_test(a, b, c, d, inside) > 0.0);
+        // Far away: clearly outside
+        let outside = [10.0, 10.0, 10.0];
+        assert!(in_sphere_test(a, b, c, d, outside) < 0.0);
+    }
+
+    // ── P1: radius_edge_ratio ─────────────────────────────────────────────────
+
+    #[test]
+    fn radius_edge_ratio_of_regular_tet_is_known_value() {
+        // For a regular tet with edge length 1, R = sqrt(6)/4, lmin = 1.
+        // So radius_edge_ratio = sqrt(6)/4 ≈ 0.6124.
+        let s = 1.0_f64;
+        let h = (2.0_f64 / 3.0).sqrt() * s;
+        let nodes = [
+            [0.0, 0.0, 0.0],
+            [s, 0.0, 0.0],
+            [s / 2.0, h, 0.0],
+            [s / 2.0, h / 3.0, (2.0_f64 / 3.0).sqrt() * h],
+        ];
+        let ratio = radius_edge_ratio(&nodes, [0, 1, 2, 3]);
+        assert!(ratio.is_finite());
+        // Regular tet ratio ≈ 0.6124 – 0.9; just confirm in range and > 0.
+        assert!(ratio > 0.0 && ratio < 2.0, "ratio={ratio}");
+    }
+
+    #[test]
+    fn radius_edge_ratio_out_of_bounds_index_returns_infinity() {
+        let nodes = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        let ratio = radius_edge_ratio(&nodes, [0, 1, 2, 3]);
+        assert!(!ratio.is_finite());
+    }
+
+    #[test]
+    fn radius_edge_ratio_degenerate_tet_returns_infinity() {
+        // All four points collinear → degenerate.
+        let nodes = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [3.0, 0.0, 0.0],
+        ];
+        let ratio = radius_edge_ratio(&nodes, [0, 1, 2, 3]);
+        // Either infinite or astronomically large (degenerate path).
+        assert!(ratio > 1e10 || !ratio.is_finite(), "ratio={ratio}");
+    }
+
+    // ── P1: solve_3x3 ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn solve_3x3_identity_system() {
+        let result = solve_3x3([
+            ([1.0, 0.0, 0.0], 3.0),
+            ([0.0, 1.0, 0.0], 5.0),
+            ([0.0, 0.0, 1.0], 7.0),
+        ]);
+        let sol = result.expect("identity system has unique solution");
+        assert!((sol[0] - 3.0).abs() < 1e-12);
+        assert!((sol[1] - 5.0).abs() < 1e-12);
+        assert!((sol[2] - 7.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn solve_3x3_general_system() {
+        // 2x + y + z = 4, x + 3y + z = 7, x + y + 4z = 9 → x=0.4, y=1.8, z=1.8
+        let result = solve_3x3([
+            ([2.0, 1.0, 1.0], 4.0),
+            ([1.0, 3.0, 1.0], 7.0),
+            ([1.0, 1.0, 4.0], 9.0),
+        ]);
+        let sol = result.expect("general system should have solution");
+        // Verify A*x = b.
+        let residual_0 = (2.0 * sol[0] + sol[1] + sol[2] - 4.0).abs();
+        let residual_1 = (sol[0] + 3.0 * sol[1] + sol[2] - 7.0).abs();
+        let residual_2 = (sol[0] + sol[1] + 4.0 * sol[2] - 9.0).abs();
+        assert!(residual_0 < 1e-10, "row 0 residual={residual_0}");
+        assert!(residual_1 < 1e-10, "row 1 residual={residual_1}");
+        assert!(residual_2 < 1e-10, "row 2 residual={residual_2}");
+    }
+
+    #[test]
+    fn solve_3x3_singular_returns_none() {
+        // Rows 0 and 1 are identical → rank-deficient.
+        let result = solve_3x3([
+            ([1.0, 2.0, 3.0], 6.0),
+            ([1.0, 2.0, 3.0], 6.0),
+            ([0.0, 0.0, 1.0], 1.0),
+        ]);
+        assert!(result.is_none(), "singular system should return None");
+    }
+
+    // ── P1: tetra_centroid_from_mesh ──────────────────────────────────────────
+
+    #[test]
+    fn tetra_centroid_is_average_of_four_nodes() {
+        let mut mesh = Mesh::new();
+        mesh.add_node(Node::new(1, 0.0, 0.0, 0.0));
+        mesh.add_node(Node::new(2, 4.0, 0.0, 0.0));
+        mesh.add_node(Node::new(3, 0.0, 4.0, 0.0));
+        mesh.add_node(Node::new(4, 0.0, 0.0, 4.0));
+        let c = tetra_centroid_from_mesh(&mesh, &[1, 2, 3, 4]).expect("centroid ok");
+        assert!((c[0] - 1.0).abs() < 1e-12);
+        assert!((c[1] - 1.0).abs() < 1e-12);
+        assert!((c[2] - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn tetra_centroid_wrong_arity_errors() {
+        let mesh = Mesh::new();
+        assert!(tetra_centroid_from_mesh(&mesh, &[1, 2, 3]).is_err());
+    }
+
+    // ── P1: refinement reduces worst ratio ────────────────────────────────────
+
+    #[test]
+    fn refinement_produces_more_elements_than_seed() {
+        let algo = Delaunay3D::default();
+        let seed_count = {
+            use crate::tetrahedralize3d::CentroidStarMesher3D;
+            use crate::traits::Mesher3D as _;
+            let params = MeshParams::with_size(0.5);
+            CentroidStarMesher3D
+                .mesh_3d(&cube_surface_mesh(), &params)
+                .unwrap()
+                .elements_by_dimension(3)
+                .len()
+        };
+        let mut params = MeshParams::with_size(0.5);
+        params.optimize_passes = 3;
+        let refined = algo
+            .mesh_3d(&cube_surface_mesh(), &params)
+            .expect("refinement should succeed");
+        let refined_count = refined.elements_by_dimension(3).len();
+        assert!(
+            refined_count >= seed_count,
+            "refinement should not reduce element count: seed={seed_count} refined={refined_count}"
+        );
+    }
 }

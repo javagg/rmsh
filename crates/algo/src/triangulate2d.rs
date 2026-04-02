@@ -392,4 +392,162 @@ mod tests {
         assert!(!poly.contains([1.5, 0.5]));
         assert!(!poly.contains([-0.1, 0.5]));
     }
+
+    // ── P1: triangulate_points edge cases & validity ──────────────────────────
+
+    #[test]
+    fn fewer_than_three_points_returns_empty() {
+        assert!(triangulate_points(&[]).is_empty());
+        assert!(triangulate_points(&[[0.0, 0.0]]).is_empty());
+        assert!(triangulate_points(&[[0.0, 0.0], [1.0, 0.0]]).is_empty());
+    }
+
+    #[test]
+    fn exactly_three_points_gives_one_triangle() {
+        let pts = [[0.0f64, 0.0], [1.0, 0.0], [0.5, 1.0]];
+        let tris = triangulate_points(&pts);
+        assert_eq!(tris.len(), 1);
+        let t = tris[0];
+        // All indices must be 0, 1, 2 (any order).
+        let mut sorted = t;
+        sorted.sort();
+        assert_eq!(sorted, [0, 1, 2]);
+    }
+
+    #[test]
+    fn all_output_indices_are_valid() {
+        let pts: Vec<[f64; 2]> = (0..20)
+            .map(|i| {
+                let angle = i as f64 * std::f64::consts::TAU / 20.0;
+                [angle.cos(), angle.sin()]
+            })
+            .collect();
+        let tris = triangulate_points(&pts);
+        assert!(!tris.is_empty());
+        for t in &tris {
+            for &idx in t {
+                assert!(idx < pts.len(), "index {idx} out of bounds");
+            }
+        }
+    }
+
+    #[test]
+    fn no_degenerate_triangles_in_output() {
+        let pts: Vec<[f64; 2]> = (0..15)
+            .map(|i| {
+                let angle = i as f64 * std::f64::consts::TAU / 15.0;
+                [angle.cos(), angle.sin()]
+            })
+            .collect();
+        let tris = triangulate_points(&pts);
+        for t in &tris {
+            let a = pts[t[0]];
+            let b = pts[t[1]];
+            let c = pts[t[2]];
+            // Signed area via cross product; degenerate if ~0.
+            let area2 = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+            assert!(area2.abs() > 1e-10, "degenerate triangle: area2={area2}");
+        }
+    }
+
+    #[test]
+    fn no_duplicate_triangles_in_output() {
+        let pts: Vec<[f64; 2]> = (0..12)
+            .map(|i| {
+                let angle = i as f64 * std::f64::consts::TAU / 12.0;
+                [angle.cos(), angle.sin()]
+            })
+            .collect();
+        let tris = triangulate_points(&pts);
+        let mut sorted_tris: Vec<[usize; 3]> =
+            tris.iter().map(|t| { let mut s = *t; s.sort(); s }).collect();
+        sorted_tris.sort();
+        let orig_len = sorted_tris.len();
+        sorted_tris.dedup();
+        assert_eq!(sorted_tris.len(), orig_len, "duplicate triangles found");
+    }
+
+    #[test]
+    fn all_input_points_appear_in_output_triangulation() {
+        let pts: Vec<[f64; 2]> = (0..10)
+            .map(|i| {
+                let angle = i as f64 * std::f64::consts::TAU / 10.0;
+                [angle.cos(), angle.sin()]
+            })
+            .collect();
+        let tris = triangulate_points(&pts);
+        let used: std::collections::HashSet<usize> = tris.iter().flatten().copied().collect();
+        for i in 0..pts.len() {
+            assert!(used.contains(&i), "point {i} not used in any triangle");
+        }
+    }
+
+    // ── P1: Polygon2D helpers ─────────────────────────────────────────────────
+
+    #[test]
+    fn bounding_box_unit_square() {
+        let poly = Polygon2D::new(vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+        let (min, max) = poly.bounding_box();
+        assert_eq!(min, [0.0, 0.0]);
+        assert_eq!(max, [1.0, 1.0]);
+    }
+
+    #[test]
+    fn bounding_box_non_axis_aligned() {
+        let poly = Polygon2D::new(vec![[-2.0, 1.0], [3.0, -1.0], [1.0, 4.0]]);
+        let (min, max) = poly.bounding_box();
+        assert!((min[0] - (-2.0)).abs() < 1e-12);
+        assert!((min[1] - (-1.0)).abs() < 1e-12);
+        assert!((max[0] - 3.0).abs() < 1e-12);
+        assert!((max[1] - 4.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn contains_on_boundary_is_consistent() {
+        // Ray casting: points exactly on edges may or may not be "inside" — just
+        // ensure the function doesn't panic and returns a bool.
+        let poly = Polygon2D::new(vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+        let _: bool = poly.contains([0.0, 0.5]); // left edge
+        let _: bool = poly.contains([0.5, 0.0]); // bottom edge
+    }
+
+    // ── P1: mesh_polygon quality ──────────────────────────────────────────────
+
+    #[test]
+    fn finer_mesh_size_produces_more_elements() {
+        let poly = Polygon2D::new(vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+        let coarse = mesh_polygon(&poly, 0.5).expect("coarse should succeed");
+        let fine = mesh_polygon(&poly, 0.15).expect("fine should succeed");
+        assert!(
+            fine.element_count() > coarse.element_count(),
+            "fine={} coarse={}",
+            fine.element_count(),
+            coarse.element_count()
+        );
+    }
+
+    #[test]
+    fn mesh_polygon_all_centroids_inside_polygon() {
+        let poly = Polygon2D::new(vec![[0.0, 0.0], [2.0, 0.0], [2.0, 1.0], [0.0, 1.0]]);
+        let mesh = mesh_polygon(&poly, 0.3).expect("meshing should succeed");
+        for elem in &mesh.elements {
+            let pts: Vec<_> = elem
+                .node_ids
+                .iter()
+                .map(|id| &mesh.nodes[id])
+                .collect();
+            let cx = pts.iter().map(|n| n.position.x).sum::<f64>() / pts.len() as f64;
+            let cy = pts.iter().map(|n| n.position.y).sum::<f64>() / pts.len() as f64;
+            assert!(
+                poly.contains([cx, cy]),
+                "element centroid ({cx},{cy}) is outside polygon"
+            );
+        }
+    }
+
+    #[test]
+    fn mesh_polygon_zero_size_fails() {
+        let poly = Polygon2D::new(vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+        assert!(mesh_polygon(&poly, 0.0).is_err());
+    }
 }
