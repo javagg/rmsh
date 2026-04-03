@@ -1,23 +1,60 @@
 # rmsh
 
-## run viewer as desktop app
+A Rust mesh generation and optimization framework with CAD kernel integration.
+
+## Features
+
+- 2D/3D mesh generation (Delaunay, frontal, paving)
+- Mesh optimization (Laplacian smoothing, quality optimization)
+- CAD boolean operations (union, intersection, difference) via rcad2
+- STEP and Gmsh MSH file I/O
+- Interactive 3D viewer (desktop via egui + wgpu)
+- Python bindings (PyO3)
+
+## Project Structure
+
+```
+rmsh/
+├── crates/
+│   ├── algo/        # Mesh generation & optimization algorithms
+│   ├── model/       # Mesh data structures (Node, Element, GModel)
+│   ├── geo/         # Geometry processing & topology classification
+│   ├── io/          # File I/O (STEP, Gmsh MSH v2/v4)
+│   ├── renderer/    # WebGPU rendering pipeline
+│   ├── viewer/      # Desktop viewer application
+│   └── py/          # Python bindings
+├── vendor/
+│   └── rcad2/       # CAD kernel submodule (BRep, boolean ops, STEP)
+│       ├── libs/rcad-kernel/       # BRep data structures
+│       ├── libs/rcad-modeling/     # Primitive shape builders
+│       ├── libs/rcad-algorithms/   # Boolean operations
+│       ├── libs/rcad-step/         # STEP reader/writer
+│       └── libs/rcad-render/       # GPU tessellation & rendering
+└── testdata/
+```
+
+## Run viewer as desktop app
+
 ```
 cargo run -p rmsh-viewer
 ```
 
-## run viewer as web app
+## Run viewer as web app
 
 ```
 trunk serve
 ```
 
-## run cad examples
+## Run tests
 
 ```sh
-cargo run -p rmsh-cad --example primitives_gallery
-cargo run -p rmsh-cad --example boolean_gallery
-cargo run -p rmsh-cad --example transform_gallery
-cargo run -p rmsh-cad --example step_export_gallery
+cargo test --workspace
 ```
 
-Generated `.msh` and `.step` files are written to `crates/cad/examples/output/` and can be opened with `rmsh-viewer`, Gmsh, or another STEP viewer for visual inspection.
+## Python bindings
+
+```sh
+cd crates/py
+maturin develop
+python -c "import rmsh; rmsh.initialize()"
+```

@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use glam::DVec3;
 use rcad_kernel::BRep;
+use rcad_algorithms::{BooleanOpType, boolean_op, geom_populate};
 use rmsh_algo::{CentroidStarMesher3D, MeshParams, Mesher3D, Polygon2D, mesh_polygon};
 use rmsh_model::{Element, ElementType, Mesh, Node};
 
@@ -504,7 +505,7 @@ fn model_occ_add_box_impl(
         .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
     ensure_initialized(&state)?;
 
-    let shape = rcad_modeling::box_brep(
+    let mut shape = rcad_modeling::box_brep(
         DVec3::new(x, y, z),
         DVec3::X,
         DVec3::Y,
@@ -513,6 +514,8 @@ fn model_occ_add_box_impl(
         dz,
     )
     .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+
+    geom_populate::populate_box_geom(&mut shape);
 
     let assigned_tag = if tag > 0 { tag } else { state.next_cad_tag + 1 };
     state.next_cad_tag = assigned_tag.max(state.next_cad_tag);
@@ -619,17 +622,22 @@ fn model_occ_cut_impl(
             break;
         }
     }
-    let base = result_shape.ok_or_else(|| {
+    let mut base = result_shape.ok_or_else(|| {
         pyo3::exceptions::PyValueError::new_err("no valid object shape found for cut")
     })?;
 
     for &(_, tag) in &tool_dim_tags {
-        if let Some(_tool) = state.cad_shapes.get(&tag) {
-            // rcad2 has no boolean kernel; tessellate the base shape as a fallback.
-            let mesh = tessellate_brep(&base);
-            state.current_mesh = Some(mesh);
+        if let Some(tool) = state.cad_shapes.get(&tag) {
+            base = boolean_op(BooleanOpType::Difference, &base, tool)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("boolean cut failed: {e}")))?;
         }
     }
+
+    // Store the result back and tessellate into current mesh
+    let first_obj_tag = obj_dim_tags.first().map(|t| t.1).unwrap_or(1);
+    let mesh = tessellate_brep(&base);
+    state.current_mesh = Some(mesh);
+    state.cad_shapes.insert(first_obj_tag, base);
 
     // Remove consumed tools
     for &(_, tag) in &tool_dim_tags {
@@ -663,16 +671,21 @@ fn model_occ_fuse_impl(
             break;
         }
     }
-    let base = result_shape.ok_or_else(|| {
+    let mut base = result_shape.ok_or_else(|| {
         pyo3::exceptions::PyValueError::new_err("no valid object shape found for fuse")
     })?;
 
     for &(_, tag) in &tool_dim_tags {
-        if let Some(_tool) = state.cad_shapes.get(&tag) {
-            let mesh = tessellate_brep(&base);
-            state.current_mesh = Some(mesh);
+        if let Some(tool) = state.cad_shapes.get(&tag) {
+            base = boolean_op(BooleanOpType::Union, &base, tool)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("boolean fuse failed: {e}")))?;
         }
     }
+
+    let first_obj_tag = obj_dim_tags.first().map(|t| t.1).unwrap_or(1);
+    let mesh = tessellate_brep(&base);
+    state.current_mesh = Some(mesh);
+    state.cad_shapes.insert(first_obj_tag, base);
 
     for &(_, tag) in &tool_dim_tags {
         state.cad_shapes.remove(&tag);
@@ -705,16 +718,21 @@ fn model_occ_fragment_impl(
             break;
         }
     }
-    let base = result_shape.ok_or_else(|| {
+    let mut base = result_shape.ok_or_else(|| {
         pyo3::exceptions::PyValueError::new_err("no valid object shape found for fragment")
     })?;
 
     for &(_, tag) in &tool_dim_tags {
-        if let Some(_tool) = state.cad_shapes.get(&tag) {
-            let mesh = tessellate_brep(&base);
-            state.current_mesh = Some(mesh);
+        if let Some(tool) = state.cad_shapes.get(&tag) {
+            base = boolean_op(BooleanOpType::Intersection, &base, tool)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("boolean fragment failed: {e}")))?;
         }
     }
+
+    let first_obj_tag = obj_dim_tags.first().map(|t| t.1).unwrap_or(1);
+    let mesh = tessellate_brep(&base);
+    state.current_mesh = Some(mesh);
+    state.cad_shapes.insert(first_obj_tag, base);
 
     let mut result_tags: Vec<(i32, i32)> = obj_dim_tags.clone();
     result_tags.extend(tool_dim_tags.iter().copied());

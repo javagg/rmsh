@@ -1,9 +1,58 @@
-use rcad_render::{Camera, GizmoRenderer, Tessellator, WgpuRenderer};
+use rcad_render::{Camera, Tessellator, WgpuRenderer};
 use rcad_kernel::{BRep, Shell, Solid, Vertex, Wire, Face};
 use rmsh_geo::extract::{PointData, SurfaceData, WireframeData};
 
+use crate::gizmo::GizmoRenderer;
+
 /// Re-export rcad-render Camera as the orbit camera.
 pub use rcad_render::Camera as OrbitCamera;
+
+/// Extension methods for `Camera` (removed from rcad-render upstream).
+pub trait CameraExt {
+    fn rotate(&mut self, delta_yaw: f32, delta_pitch: f32);
+    fn zoom(&mut self, delta: f32);
+    fn pan(&mut self, delta_x: f32, delta_y: f32);
+    fn fit_to_bbox(&mut self, center: [f32; 3], diagonal: f32);
+    fn set_isometric(&mut self);
+    fn toggle_projection(&mut self);
+    fn orthographic(&self) -> bool;
+}
+
+impl CameraExt for Camera {
+    fn rotate(&mut self, delta_yaw: f32, delta_pitch: f32) {
+        self.rot_y += delta_yaw;
+        self.rot_x = (self.rot_x + delta_pitch).clamp(
+            -std::f32::consts::FRAC_PI_2 + 0.01,
+            std::f32::consts::FRAC_PI_2 - 0.01,
+        );
+    }
+
+    fn zoom(&mut self, delta: f32) {
+        self.distance = (self.distance * (1.0 - delta)).max(0.01);
+    }
+
+    fn pan(&mut self, delta_x: f32, delta_y: f32) {
+        self.pan_pixels(delta_x, delta_y);
+    }
+
+    fn fit_to_bbox(&mut self, center: [f32; 3], diagonal: f32) {
+        self.target = glam::Vec3::new(center[0], center[1], center[2]);
+        self.distance = diagonal * 1.5;
+    }
+
+    fn set_isometric(&mut self) {
+        self.rot_x = 0.6154_8246; // atan(1/sqrt(2))
+        self.rot_y = std::f32::consts::FRAC_PI_4;
+    }
+
+    fn toggle_projection(&mut self) {
+        // Perspective-only camera; no-op.
+    }
+
+    fn orthographic(&self) -> bool {
+        false
+    }
+}
 
 /// Rendering configuration — controls what elements are visible.
 #[derive(Debug, Clone)]

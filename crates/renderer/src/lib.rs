@@ -1,3 +1,5 @@
+pub mod gizmo;
 pub mod scene;
 
-pub use scene::{OrbitCamera, RenderConfig, Scene};
+pub use gizmo::GizmoRenderer;
+pub use scene::{CameraExt, OrbitCamera, RenderConfig, Scene};

@@ -10,7 +10,7 @@ use rmsh_algo::{
 };
 use rmsh_geo::extract::{PointData, SurfaceData, WireframeData};
 use rmsh_model::{GSelection, Mesh, Point3, Topology, Vector3};
-use rmsh_renderer::{RenderConfig, Scene};
+use rmsh_renderer::{CameraExt, RenderConfig, Scene};
 
 use crate::io::{
     IoEvent, IoQueue, MshSaveFormat, default_save_name, drain_io_events, enqueue_event,
