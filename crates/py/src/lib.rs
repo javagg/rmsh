@@ -7,8 +7,15 @@ use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use glam::DVec3;
-use rcad_kernel::BRep;
-use rcad_algorithms::{BooleanOpType, boolean_op, geom_populate};
+use rcad_kernel::{BRep, geom::Plane};
+use rcad_algorithms::{
+    BooleanOpType, boolean_op, geom_populate,
+    brep_check::check,
+    hlr::{hlr, hlr_to_svg, HlrCamera},
+    section::section_polylines,
+};
+use rcad_modeling::builder::ops::{extrude, revolve};
+use rcad_step::assembly::{write_assembly, AssemblyComponent};
 use rmsh_algo::{CentroidStarMesher3D, MeshParams, Mesher3D, Polygon2D, mesh_polygon};
 use rmsh_model::{Element, ElementType, Mesh, Node};
 
@@ -540,7 +547,7 @@ fn model_occ_add_sphere_impl(
         .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
     ensure_initialized(&state)?;
 
-    let shape = rcad_modeling::sphere_brep(DVec3::new(x, y, z), r, 16, 12)
+    let shape = rcad_modeling::sphere_brep(DVec3::new(x, y, z), r)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
 
     let assigned_tag = if tag > 0 { tag } else { state.next_cad_tag + 1 };
@@ -589,7 +596,6 @@ fn model_occ_add_cylinder_impl(
         ref_dir,
         r,
         height,
-        16,
     )
     .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
 
@@ -887,7 +893,248 @@ fn gui_wait_impl(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) 
     Ok(())
 }
 
-#[pyo3::pymodule]
+// ── Shape properties ──────────────────────────────────────────────────────────
+
+/// Return the surface area of the current CAD shape or mesh.
+#[pyfunction]
+#[pyo3(name = "model_occ_get_mass", signature = (*args, **kwargs))]
+fn model_occ_get_mass_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<f64> {
+    let tag: i32 = extract_required(args, kwargs, 0, &["tag"], "int")?;
+    let state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    ensure_initialized(&state)?;
+    let brep = state.cad_shapes.get(&tag).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!("no shape with tag {tag}"))
+    })?;
+    Ok(rcad_kernel::properties::volume(brep).abs())
+}
+
+/// Return (volume, surface_area, cx, cy, cz) for a CAD shape.
+#[pyfunction]
+#[pyo3(name = "model_occ_get_properties", signature = (*args, **kwargs))]
+fn model_occ_get_properties_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<(f64, f64, f64, f64, f64)> {
+    let tag: i32 = extract_required(args, kwargs, 0, &["tag"], "int")?;
+    let state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    ensure_initialized(&state)?;
+    let brep = state.cad_shapes.get(&tag).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!("no shape with tag {tag}"))
+    })?;
+    let vol = rcad_kernel::properties::volume(brep).abs();
+    let area = rcad_kernel::properties::surface_area(brep);
+    let c = rcad_kernel::properties::centroid(brep);
+    Ok((vol, area, c.x, c.y, c.z))
+}
+
+// ── Extrude / Revolve ─────────────────────────────────────────────────────────
+
+/// Extrude face `face_idx` of shape `tag` along `(dx,dy,dz)` by `distance`.
+/// Returns a new tag for the resulting solid.
+#[pyfunction]
+#[pyo3(name = "model_occ_extrude", signature = (*args, **kwargs))]
+fn model_occ_extrude_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<i32> {
+    let tag: i32 = extract_required(args, kwargs, 0, &["tag"], "int")?;
+    let face_idx: usize = extract_required(args, kwargs, 1, &["face_idx"], "int")?;
+    let dx: f64 = extract_required(args, kwargs, 2, &["dx"], "float")?;
+    let dy: f64 = extract_required(args, kwargs, 3, &["dy"], "float")?;
+    let dz: f64 = extract_required(args, kwargs, 4, &["dz"], "float")?;
+    let distance: f64 = extract_required(args, kwargs, 5, &["distance"], "float")?;
+
+    let mut state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    ensure_initialized(&state)?;
+    let base = state.cad_shapes.get(&tag).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!("no shape with tag {tag}"))
+    })?.clone();
+
+    let result = extrude(&base, face_idx, DVec3::new(dx, dy, dz), distance)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+
+    let new_tag = state.next_cad_tag + 1;
+    state.next_cad_tag = new_tag;
+    state.cad_shapes.insert(new_tag, result);
+    Ok(new_tag)
+}
+
+/// Revolve face `face_idx` of shape `tag` around axis through `(ax,ay,az)`
+/// in direction `(dx,dy,dz)` by `angle` radians. Returns a new tag.
+#[pyfunction]
+#[pyo3(name = "model_occ_revolve", signature = (*args, **kwargs))]
+fn model_occ_revolve_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<i32> {
+    let tag: i32 = extract_required(args, kwargs, 0, &["tag"], "int")?;
+    let face_idx: usize = extract_required(args, kwargs, 1, &["face_idx"], "int")?;
+    let ax: f64 = extract_required(args, kwargs, 2, &["ax"], "float")?;
+    let ay: f64 = extract_required(args, kwargs, 3, &["ay"], "float")?;
+    let az: f64 = extract_required(args, kwargs, 4, &["az"], "float")?;
+    let dx: f64 = extract_required(args, kwargs, 5, &["dx"], "float")?;
+    let dy: f64 = extract_required(args, kwargs, 6, &["dy"], "float")?;
+    let dz: f64 = extract_required(args, kwargs, 7, &["dz"], "float")?;
+    let angle: f64 = extract_required(args, kwargs, 8, &["angle"], "float")?;
+
+    let mut state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    ensure_initialized(&state)?;
+    let base = state.cad_shapes.get(&tag).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!("no shape with tag {tag}"))
+    })?.clone();
+
+    let result = revolve(&base, face_idx, DVec3::new(ax, ay, az), DVec3::new(dx, dy, dz), angle)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+
+    let new_tag = state.next_cad_tag + 1;
+    state.next_cad_tag = new_tag;
+    state.cad_shapes.insert(new_tag, result);
+    Ok(new_tag)
+}
+
+// ── BRep validation ───────────────────────────────────────────────────────────
+
+/// Validate a CAD shape. Returns list of issue description strings (empty = valid).
+#[pyfunction]
+#[pyo3(name = "model_occ_check", signature = (*args, **kwargs))]
+fn model_occ_check_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Vec<String>> {
+    let tag: i32 = extract_required(args, kwargs, 0, &["tag"], "int")?;
+    let state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    ensure_initialized(&state)?;
+    let brep = state.cad_shapes.get(&tag).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!("no shape with tag {tag}"))
+    })?;
+    let result = check(brep);
+    Ok(result.issues.iter().map(|i| format!("{i:?}")).collect())
+}
+
+// ── Section (cross-section) ───────────────────────────────────────────────────
+
+/// Compute cross-section of shape `tag` with a plane defined by origin `(ox,oy,oz)`
+/// and normal `(nx,ny,nz)`. Returns list of polylines, each a list of (x,y,z) tuples.
+#[pyfunction]
+#[pyo3(name = "model_occ_section", signature = (*args, **kwargs))]
+fn model_occ_section_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Vec<Vec<(f64, f64, f64)>>> {
+    let tag: i32 = extract_required(args, kwargs, 0, &["tag"], "int")?;
+    let ox: f64 = extract_required(args, kwargs, 1, &["ox"], "float")?;
+    let oy: f64 = extract_required(args, kwargs, 2, &["oy"], "float")?;
+    let oz: f64 = extract_required(args, kwargs, 3, &["oz"], "float")?;
+    let nx: f64 = extract_required(args, kwargs, 4, &["nx"], "float")?;
+    let ny: f64 = extract_required(args, kwargs, 5, &["ny"], "float")?;
+    let nz: f64 = extract_required(args, kwargs, 6, &["nz"], "float")?;
+
+    let state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    ensure_initialized(&state)?;
+    let brep = state.cad_shapes.get(&tag).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!("no shape with tag {tag}"))
+    })?;
+
+    let normal = DVec3::new(nx, ny, nz).normalize_or_zero();
+    if normal.length_squared() < 1e-12 {
+        return Err(pyo3::exceptions::PyValueError::new_err("section plane normal must be non-zero"));
+    }
+    let plane = Plane { origin: DVec3::new(ox, oy, oz), normal };
+    let polylines = section_polylines(brep, &plane);
+    Ok(polylines
+        .into_iter()
+        .map(|pts| pts.into_iter().map(|p| (p.x, p.y, p.z)).collect())
+        .collect())
+}
+
+// ── HLR (hidden-line removal → SVG) ──────────────────────────────────────────
+
+/// Render shape `tag` as an SVG string using hidden-line removal.
+/// `camera_type`: "isometric" | "front" | "top" | "right" (default "isometric").
+/// `distance`: camera distance (default 5.0).
+/// Returns SVG string.
+#[pyfunction]
+#[pyo3(name = "model_occ_to_svg", signature = (*args, **kwargs))]
+fn model_occ_to_svg_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<String> {
+    let tag: i32 = extract_required(args, kwargs, 0, &["tag"], "int")?;
+    let camera_type: String = extract_required(args, kwargs, 1, &["camera_type"], "str")
+        .unwrap_or_else(|_| "isometric".to_string());
+    let distance: f64 = extract_required(args, kwargs, 2, &["distance"], "float")
+        .unwrap_or(5.0);
+
+    let state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    ensure_initialized(&state)?;
+    let brep = state.cad_shapes.get(&tag).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!("no shape with tag {tag}"))
+    })?;
+
+    let camera = match camera_type.to_lowercase().as_str() {
+        "front" => HlrCamera::front(distance),
+        "top" => HlrCamera::top(distance),
+        "right" => HlrCamera::right(distance),
+        _ => HlrCamera::isometric(distance),
+    };
+    let result = hlr(brep, &camera, 32);
+    Ok(hlr_to_svg(&result, 200.0, 20.0))
+}
+
+// ── Assembly STEP export ──────────────────────────────────────────────────────
+
+/// Write all current CAD shapes as a STEP assembly file.
+/// `path`: output file path. `name`: assembly name (default "assembly").
+#[pyfunction]
+#[pyo3(name = "model_occ_write_assembly", signature = (*args, **kwargs))]
+fn model_occ_write_assembly_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<()> {
+    let path: String = extract_required(args, kwargs, 0, &["path", "fileName"], "str")?;
+    let name: String = extract_required(args, kwargs, 1, &["name"], "str")
+        .unwrap_or_else(|_| "assembly".to_string());
+
+    let state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    ensure_initialized(&state)?;
+
+    let mut components: Vec<AssemblyComponent> = state
+        .cad_shapes
+        .iter()
+        .map(|(tag, brep)| AssemblyComponent::new(format!("part_{tag}"), brep.clone()))
+        .collect();
+    // Sort by tag for deterministic output
+    components.sort_by_key(|c| c.name.clone());
+
+    if components.is_empty() {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "no CAD shapes to export; call model_occ_add_* first",
+        ));
+    }
+
+    let step_text = write_assembly(&name, &components);
+    std::fs::write(&path, step_text)
+        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
+}
 fn _rmsh(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(pyo3::wrap_pyfunction!(initialize_impl, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(finalize_impl, m)?)?;
@@ -952,6 +1199,15 @@ fn _rmsh(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(pyo3::wrap_pyfunction!(gui_initialize_impl, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(gui_run_impl, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(gui_wait_impl, m)?)?;
+
+    m.add_function(pyo3::wrap_pyfunction!(model_occ_get_mass_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_occ_get_properties_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_occ_extrude_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_occ_revolve_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_occ_check_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_occ_section_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_occ_to_svg_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_occ_write_assembly_impl, m)?)?;
 
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
