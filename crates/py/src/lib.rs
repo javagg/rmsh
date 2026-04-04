@@ -470,6 +470,21 @@ fn option_get_color_impl(
     })
 }
 
+#[pyfunction]
+#[pyo3(name = "option_restore_defaults", signature = (*_args, **_kwargs))]
+fn option_restore_defaults_impl(
+    _args: &Bound<'_, PyTuple>,
+    _kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<()> {
+    let mut state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    state.option_numbers.clear();
+    state.option_strings.clear();
+    state.option_colors.clear();
+    Ok(())
+}
+
 stub_pyfunction!(logger_start_impl, "logger_start", "rmshLoggerStart(int *ierr)");
 stub_pyfunction!(logger_stop_impl, "logger_stop", "rmshLoggerStop(int *ierr)");
 stub_pyfunction!(logger_get_impl, "logger_get", "rmshLoggerGet(char ***log, size_t *log_n, int *ierr)");
@@ -1251,6 +1266,7 @@ fn _rmsh(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(pyo3::wrap_pyfunction!(option_get_string_impl, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(option_set_color_impl, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(option_get_color_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(option_restore_defaults_impl, m)?)?;
 
     m.add_function(pyo3::wrap_pyfunction!(logger_start_impl, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(logger_stop_impl, m)?)?;
