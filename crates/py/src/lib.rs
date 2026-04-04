@@ -488,12 +488,6 @@ stub_pyfunction!(model_get_physical_groups_impl, "model_get_physical_groups", "r
 stub_pyfunction!(model_set_physical_name_impl, "model_set_physical_name", "rmshModelSetPhysicalName(int dim, int tag, const char *name, int *ierr)");
 stub_pyfunction!(model_get_physical_name_impl, "model_get_physical_name", "rmshModelGetPhysicalName(int dim, int tag, char **name, int *ierr)");
 
-stub_pyfunction!(model_geo_add_point_impl, "model_geo_add_point", "rmshModelGeoAddPoint(double x, double y, double z, double meshSize, int tag, int *ierr)");
-stub_pyfunction!(model_geo_add_line_impl, "model_geo_add_line", "rmshModelGeoAddLine(int startTag, int endTag, int tag, int *ierr)");
-stub_pyfunction!(model_geo_add_curve_loop_impl, "model_geo_add_curve_loop", "rmshModelGeoAddCurveLoop(const int *curveTags, size_t curveTags_n, int tag, int *ierr)");
-stub_pyfunction!(model_geo_add_plane_surface_impl, "model_geo_add_plane_surface", "rmshModelGeoAddPlaneSurface(const int *wireTags, size_t wireTags_n, int tag, int *ierr)");
-stub_pyfunction!(model_geo_synchronize_impl, "model_geo_synchronize", "rmshModelGeoSynchronize(int *ierr)");
-
 #[pyfunction]
 #[pyo3(name = "model_occ_add_box", signature = (*args, **kwargs))]
 fn model_occ_add_box_impl(
@@ -1275,12 +1269,6 @@ fn _rmsh(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(pyo3::wrap_pyfunction!(model_get_physical_groups_impl, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(model_set_physical_name_impl, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(model_get_physical_name_impl, m)?)?;
-
-    m.add_function(pyo3::wrap_pyfunction!(model_geo_add_point_impl, m)?)?;
-    m.add_function(pyo3::wrap_pyfunction!(model_geo_add_line_impl, m)?)?;
-    m.add_function(pyo3::wrap_pyfunction!(model_geo_add_curve_loop_impl, m)?)?;
-    m.add_function(pyo3::wrap_pyfunction!(model_geo_add_plane_surface_impl, m)?)?;
-    m.add_function(pyo3::wrap_pyfunction!(model_geo_synchronize_impl, m)?)?;
 
     m.add_function(pyo3::wrap_pyfunction!(model_occ_add_box_impl, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(model_occ_add_sphere_impl, m)?)?;
