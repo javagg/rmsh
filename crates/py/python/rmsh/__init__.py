@@ -312,6 +312,60 @@ def _model_occ_synchronize(*args, **kwargs):
 
 model_occ.synchronize = _model_occ_synchronize
 
+def _model_occ_addCone(*args, **kwargs):
+    """addCone(x, y, z, dx, dy, dz, r, tag=-1) -> tag"""
+    return _invoke("model_occ_add_cone", *args, **kwargs)
+
+model_occ.addCone = _model_occ_addCone
+
+def _model_occ_addTorus(*args, **kwargs):
+    """addTorus(x, y, z, dx, dy, dz, r1, r2, tag=-1) -> tag"""
+    return _invoke("model_occ_add_torus", *args, **kwargs)
+
+model_occ.addTorus = _model_occ_addTorus
+
+def _model_occ_fillet(*args, **kwargs):
+    """fillet(tag, curveTags, radii) -> new_tag"""
+    return _invoke("model_occ_fillet", *args, **kwargs)
+
+model_occ.fillet = _model_occ_fillet
+
+def _model_occ_chamfer(*args, **kwargs):
+    """chamfer(tag, curveTags, distances) -> new_tag"""
+    return _invoke("model_occ_chamfer", *args, **kwargs)
+
+model_occ.chamfer = _model_occ_chamfer
+
+def _model_occ_healShapes(*args, **kwargs):
+    """healShapes(tag, tolerance=1e-8) -> report_dict"""
+    return _invoke("model_occ_heal_shapes", *args, **kwargs)
+
+model_occ.healShapes = _model_occ_healShapes
+
+def _model_occ_getMass(*args, **kwargs):
+    """getMass(tag) -> volume"""
+    return _invoke("model_occ_get_mass", *args, **kwargs)
+
+model_occ.getMass = _model_occ_getMass
+
+def _model_occ_getProperties(*args, **kwargs):
+    """getProperties(tag) -> (volume, area, cx, cy, cz)"""
+    return _invoke("model_occ_get_properties", *args, **kwargs)
+
+model_occ.getProperties = _model_occ_getProperties
+
+def _model_occ_extrude(*args, **kwargs):
+    """extrude(tag, face_idx, dx, dy, dz, distance) -> new_tag"""
+    return _invoke("model_occ_extrude", *args, **kwargs)
+
+model_occ.extrude = _model_occ_extrude
+
+def _model_occ_revolve(*args, **kwargs):
+    """revolve(tag, face_idx, ax, ay, az, dx, dy, dz, angle) -> new_tag"""
+    return _invoke("model_occ_revolve", *args, **kwargs)
+
+model_occ.revolve = _model_occ_revolve
+
 def _option_getColor(*args, **kwargs):
     """rmshOptionGetColor(name, r, g, b, a, ierr)"""
     return _invoke("option_get_color", *args, **kwargs)
@@ -347,6 +401,12 @@ def _option_setString(*args, **kwargs):
     return _invoke("option_set_string", *args, **kwargs)
 
 option.setString = _option_setString
+
+def _option_restoreDefaults(*args, **kwargs):
+    """restoreDefaults() - clear all option overrides"""
+    return _invoke("option_restore_defaults", *args, **kwargs)
+
+option.restoreDefaults = _option_restoreDefaults
 
 def _plugin_run(*args, **kwargs):
     """rmshPluginRun(name, ierr)"""

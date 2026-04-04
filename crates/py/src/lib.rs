@@ -1252,6 +1252,7 @@ fn model_occ_heal_shapes_impl(
     })
 }
 
+#[pyo3::prelude::pymodule]
 fn _rmsh(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(pyo3::wrap_pyfunction!(initialize_impl, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(finalize_impl, m)?)?;
