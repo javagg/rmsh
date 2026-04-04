@@ -115,6 +115,53 @@ The `GModel` is constructed via **dihedral-angle based classification** (inspire
 
 ---
 
+## Python API Naming Convention
+
+The Python bindings (`rmsh-py`) expose two categories of functions, distinguished by prefix:
+
+### `model_occ_*` — Gmsh-compatible API
+
+Functions in this namespace **must correspond 1:1 with `gmsh.model.occ.*`** in name and signature. This allows users to port Gmsh scripts to rmsh with minimal changes.
+
+| rmsh Python name | Gmsh equivalent | Notes |
+|---|---|---|
+| `model_occ_add_box` | `addBox` | ✅ |
+| `model_occ_add_sphere` | `addSphere` | ✅ |
+| `model_occ_add_cylinder` | `addCylinder` | ✅ |
+| `model_occ_add_cone` | `addCone` | ✅ (single base radius; Gmsh supports r1+r2 truncated cone) |
+| `model_occ_add_torus` | `addTorus` | ✅ |
+| `model_occ_cut` | `cut` | ✅ |
+| `model_occ_fuse` | `fuse` | ✅ |
+| `model_occ_fragment` | `fragment` | ✅ |
+| `model_occ_synchronize` | `synchronize` | ✅ |
+| `model_occ_extrude` | `extrude` | ✅ |
+| `model_occ_revolve` | `revolve` | ✅ |
+| `model_occ_fillet` | `fillet` | Signature: `(tag, curveTags, radii)` |
+| `model_occ_chamfer` | `chamfer` | Signature: `(tag, curveTags, distances)` |
+| `model_occ_heal_shapes` | `healShapes` | Signature: `(tag, tolerance=1e-8)` |
+| `model_occ_get_mass` | `getMass` | ✅ |
+| `model_occ_get_properties` | (extended) | Returns `(vol, area, cx, cy, cz)` |
+
+**Rule:** Do **not** add functions here that do not exist in `gmsh.model.occ`. If you are tempted to add a `model_occ_*` function, check the Gmsh API docs first.
+
+### `rmsh_*` — rmsh extensions
+
+Functions with the `rmsh_` prefix are **rmsh-specific** and have no Gmsh equivalent. They expose capabilities from the rcad CAD kernel that go beyond what Gmsh provides.
+
+| rmsh Python name | Purpose |
+|---|---|
+| `rmsh_check` | BRep validity check |
+| `rmsh_section` | Cross-section polylines from a plane |
+| `rmsh_to_svg` | HLR hidden-line removal → SVG |
+| `rmsh_write_assembly` | Export STEP assembly file |
+| `rmsh_corner_blend` | Chamfer a convex vertex corner |
+| `rmsh_imprint` | Imprint tool boundaries onto target faces (FEM preprocessing) |
+| `rmsh_detect_gaps_overlaps` | Assembly gap/overlap QA |
+
+**Rule:** Any function without a Gmsh counterpart **must** use the `rmsh_` prefix, never `model_occ_`.
+
+---
+
 ## Rationale
 
 This naming convention:

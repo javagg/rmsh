@@ -1094,61 +1094,47 @@ fn model_occ_add_torus_impl(
     Ok(assigned_tag)
 }
 
-// ── Fillet / Chamfer ──────────────────────────────────────────────────────────
+// ── Fillet / Chamfer (Gmsh-compatible) ───────────────────────────────────────
 
-/// Fillet edge `edge_idx` of shape `tag` with `radius`.
+/// Round the edges of a volume.
+/// Signature matches gmsh.model.occ.fillet:
+///   fillet(tag, curveTags, radii) -> new_tag
+/// `curveTags`: list of edge indices (0-based) to fillet.
+/// `radii`: list of radii, one per edge, or a single value applied to all.
 /// Returns a new tag for the modified shape.
 #[pyfunction]
-#[pyo3(name = "model_occ_fillet_edge", signature = (*args, **kwargs))]
-fn model_occ_fillet_edge_impl(
+#[pyo3(name = "model_occ_fillet", signature = (*args, **kwargs))]
+fn model_occ_fillet_impl(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<i32> {
     let tag: i32 = extract_required(args, kwargs, 0, &["tag"], "int")?;
-    let edge_idx: usize = extract_required(args, kwargs, 1, &["edge_idx"], "int")?;
-    let radius: f64 = extract_required(args, kwargs, 2, &["radius"], "float")?;
 
-    let mut state = STATE
-        .lock()
-        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
-    ensure_initialized(&state)?;
-    let base = state.cad_shapes.get(&tag).ok_or_else(|| {
-        pyo3::exceptions::PyValueError::new_err(format!("no shape with tag {tag}"))
-    })?.clone();
+    let curve_tags: Vec<usize> = args.get_item(1).ok()
+        .or_else(|| kwargs.and_then(|kw| kw.get_item("curveTags").ok().flatten()))
+        .ok_or_else(|| pyo3::exceptions::PyTypeError::new_err("curveTags required"))?
+        .extract::<Vec<usize>>()
+        .map_err(|_| pyo3::exceptions::PyTypeError::new_err("curveTags must be a list of ints"))?;
 
-    let result = fillet_edge(&base, edge_idx, radius)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    let radii_raw: Vec<f64> = args.get_item(2).ok()
+        .or_else(|| kwargs.and_then(|kw| kw.get_item("radii").ok().flatten()))
+        .ok_or_else(|| pyo3::exceptions::PyTypeError::new_err("radii required"))?
+        .extract::<Vec<f64>>()
+        .map_err(|_| pyo3::exceptions::PyTypeError::new_err("radii must be a list of floats"))?;
 
-    let new_tag = state.next_cad_tag + 1;
-    state.next_cad_tag = new_tag;
-    state.cad_shapes.insert(new_tag, result);
-    Ok(new_tag)
-}
-
-/// Fillet multiple edges of shape `tag` in one call.
-/// `edges` is a list of (edge_idx, radius) pairs.
-/// Returns a new tag for the modified shape.
-#[pyfunction]
-#[pyo3(name = "model_occ_fillet_edges", signature = (*args, **kwargs))]
-fn model_occ_fillet_edges_impl(
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<i32> {
-    let tag: i32 = extract_required(args, kwargs, 0, &["tag"], "int")?;
-    let edges_list: Vec<(usize, f64)> = {
-        let item = args.get_item(1)
-            .ok()
-            .or_else(|| kwargs.and_then(|kw| kw.get_item("edges").ok().flatten()));
-        match item {
-            Some(v) => v.extract::<Vec<(usize, f64)>>()
-                .map_err(|_| pyo3::exceptions::PyTypeError::new_err(
-                    "edges must be a list of (edge_idx: int, radius: float) tuples"
-                ))?,
-            None => return Err(pyo3::exceptions::PyTypeError::new_err(
-                "edges argument is required"
-            )),
-        }
+    // Expand scalar radius to per-edge list
+    let radii: Vec<f64> = if radii_raw.len() == 1 {
+        vec![radii_raw[0]; curve_tags.len()]
+    } else {
+        radii_raw
     };
+    if radii.len() != curve_tags.len() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "radii length must match curveTags length (or be a single value)"
+        ));
+    }
+
+    let edges: Vec<(usize, f64)> = curve_tags.into_iter().zip(radii).collect();
 
     let mut state = STATE
         .lock()
@@ -1158,7 +1144,7 @@ fn model_occ_fillet_edges_impl(
         pyo3::exceptions::PyValueError::new_err(format!("no shape with tag {tag}"))
     })?.clone();
 
-    let result = fillet_edges(&base, &edges_list)
+    let result = fillet_edges(&base, &edges)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
 
     let new_tag = state.next_cad_tag + 1;
@@ -1167,17 +1153,42 @@ fn model_occ_fillet_edges_impl(
     Ok(new_tag)
 }
 
-/// Chamfer edge `edge_idx` of shape `tag` by `dist` on each side.
+/// Chamfer the edges of a volume.
+/// Signature matches gmsh.model.occ.chamfer:
+///   chamfer(tag, curveTags, distances) -> new_tag
+/// `curveTags`: list of edge indices (0-based) to chamfer.
+/// `distances`: list of chamfer distances, one per edge, or a single value.
 /// Returns a new tag for the modified shape.
 #[pyfunction]
-#[pyo3(name = "model_occ_chamfer_edge", signature = (*args, **kwargs))]
-fn model_occ_chamfer_edge_impl(
+#[pyo3(name = "model_occ_chamfer", signature = (*args, **kwargs))]
+fn model_occ_chamfer_impl(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<i32> {
     let tag: i32 = extract_required(args, kwargs, 0, &["tag"], "int")?;
-    let edge_idx: usize = extract_required(args, kwargs, 1, &["edge_idx"], "int")?;
-    let dist: f64 = extract_required(args, kwargs, 2, &["dist"], "float")?;
+
+    let curve_tags: Vec<usize> = args.get_item(1).ok()
+        .or_else(|| kwargs.and_then(|kw| kw.get_item("curveTags").ok().flatten()))
+        .ok_or_else(|| pyo3::exceptions::PyTypeError::new_err("curveTags required"))?
+        .extract::<Vec<usize>>()
+        .map_err(|_| pyo3::exceptions::PyTypeError::new_err("curveTags must be a list of ints"))?;
+
+    let distances_raw: Vec<f64> = args.get_item(2).ok()
+        .or_else(|| kwargs.and_then(|kw| kw.get_item("distances").ok().flatten()))
+        .ok_or_else(|| pyo3::exceptions::PyTypeError::new_err("distances required"))?
+        .extract::<Vec<f64>>()
+        .map_err(|_| pyo3::exceptions::PyTypeError::new_err("distances must be a list of floats"))?;
+
+    let distances: Vec<f64> = if distances_raw.len() == 1 {
+        vec![distances_raw[0]; curve_tags.len()]
+    } else {
+        distances_raw
+    };
+    if distances.len() != curve_tags.len() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "distances length must match curveTags length (or be a single value)"
+        ));
+    }
 
     let mut state = STATE
         .lock()
@@ -1187,20 +1198,63 @@ fn model_occ_chamfer_edge_impl(
         pyo3::exceptions::PyValueError::new_err(format!("no shape with tag {tag}"))
     })?.clone();
 
-    let result = chamfer_edge(&base, edge_idx, dist)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    // Apply chamfers sequentially (descending edge index to preserve indices)
+    let mut edges: Vec<(usize, f64)> = curve_tags.into_iter().zip(distances).collect();
+    edges.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut current = base;
+    for (edge_idx, dist) in edges {
+        current = chamfer_edge(&current, edge_idx, dist)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    }
 
     let new_tag = state.next_cad_tag + 1;
     state.next_cad_tag = new_tag;
-    state.cad_shapes.insert(new_tag, result);
+    state.cad_shapes.insert(new_tag, current);
     Ok(new_tag)
 }
 
-/// Blend (chamfer) a convex vertex corner by trimming `radius` from the three incident edges.
-/// Returns a new tag for the modified shape.
+/// Heal (repair) a shape: merge close vertices, recompute normals, fix wire orientations.
+/// Signature matches gmsh.model.occ.healShapes:
+///   heal_shapes(tag, tolerance=1e-8) -> report_dict
+/// Updates the shape in-place. Returns a dict with repair counts.
 #[pyfunction]
-#[pyo3(name = "model_occ_corner_blend", signature = (*args, **kwargs))]
-fn model_occ_corner_blend_impl(
+#[pyo3(name = "model_occ_heal_shapes", signature = (*args, **kwargs))]
+fn model_occ_heal_shapes_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<pyo3::PyObject> {
+    let tag: i32 = extract_required(args, kwargs, 0, &["tag"], "int")?;
+    let tolerance: f64 = extract_required(args, kwargs, 1, &["tolerance"], "float")
+        .unwrap_or(1e-8);
+
+    let mut state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    ensure_initialized(&state)?;
+    let brep = state.cad_shapes.get_mut(&tag).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!("no shape with tag {tag}"))
+    })?;
+
+    let (repaired, report) = repair(brep, tolerance);
+    *brep = repaired;
+
+    Python::with_gil(|py| {
+        let dict = pyo3::types::PyDict::new(py);
+        dict.set_item("vertices_merged", report.vertices_merged)?;
+        dict.set_item("degenerate_faces_removed", report.degenerate_faces_removed)?;
+        dict.set_item("normals_recomputed", report.normals_recomputed)?;
+        dict.set_item("wires_fixed", report.wires_fixed)?;
+        Ok(dict.into())
+    })
+}
+
+// ── rmsh extensions (no Gmsh equivalent) ─────────────────────────────────────
+
+/// Blend a convex vertex corner (rmsh extension, no Gmsh equivalent).
+/// rmsh_corner_blend(tag, vertex_idx, radius) -> new_tag
+#[pyfunction]
+#[pyo3(name = "rmsh_corner_blend", signature = (*args, **kwargs))]
+fn rmsh_corner_blend_impl(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<i32> {
@@ -1225,49 +1279,11 @@ fn model_occ_corner_blend_impl(
     Ok(new_tag)
 }
 
-// ── BRep repair ───────────────────────────────────────────────────────────────
-
-/// Repair shape `tag`: merge close vertices, remove degenerate faces,
-/// recompute face normals, fix wire orientations.
-/// Updates the shape in-place and returns a report dict with counts.
+/// Imprint shape B onto shape A (rmsh extension, no Gmsh equivalent).
+/// rmsh_imprint(tag_a, tag_b) -> new_tag
 #[pyfunction]
-#[pyo3(name = "model_occ_repair", signature = (*args, **kwargs))]
-fn model_occ_repair_impl(
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<pyo3::PyObject> {
-    let tag: i32 = extract_required(args, kwargs, 0, &["tag"], "int")?;
-    let tolerance: f64 = extract_required(args, kwargs, 1, &["tolerance"], "float")
-        .unwrap_or(1e-6);
-
-    let mut state = STATE
-        .lock()
-        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
-    ensure_initialized(&state)?;
-    let brep = state.cad_shapes.get_mut(&tag).ok_or_else(|| {
-        pyo3::exceptions::PyValueError::new_err(format!("no shape with tag {tag}"))
-    })?;
-
-    let (repaired, report) = repair(brep, tolerance);
-    *brep = repaired;
-
-    Python::with_gil(|py| {
-        let dict = pyo3::types::PyDict::new(py);
-        dict.set_item("vertices_merged", report.vertices_merged)?;
-        dict.set_item("degenerate_faces_removed", report.degenerate_faces_removed)?;
-        dict.set_item("normals_recomputed", report.normals_recomputed)?;
-        dict.set_item("wires_fixed", report.wires_fixed)?;
-        Ok(dict.into())
-    })
-}
-
-// ── Imprint / gap detection ───────────────────────────────────────────────────
-
-/// Imprint shape B onto shape A (split A's faces by B's edges).
-/// Returns a new tag for the imprinted A.
-#[pyfunction]
-#[pyo3(name = "model_occ_imprint", signature = (*args, **kwargs))]
-fn model_occ_imprint_impl(
+#[pyo3(name = "rmsh_imprint", signature = (*args, **kwargs))]
+fn rmsh_imprint_impl(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<i32> {
@@ -1293,12 +1309,11 @@ fn model_occ_imprint_impl(
     Ok(new_tag)
 }
 
-/// Detect gaps and overlaps between shapes `tag_a` and `tag_b`.
-/// Returns a dict with `gaps: [(ax,ay,az, bx,by,bz, distance), ...]`
-/// and `overlaps: [(ax,ay,az, bx,by,bz, depth), ...]`.
+/// Detect gaps and overlaps between two shapes (rmsh extension, no Gmsh equivalent).
+/// rmsh_detect_gaps_overlaps(tag_a, tag_b, tolerance=1e-3) -> dict
 #[pyfunction]
-#[pyo3(name = "model_occ_detect_gaps_overlaps", signature = (*args, **kwargs))]
-fn model_occ_detect_gaps_overlaps_impl(
+#[pyo3(name = "rmsh_detect_gaps_overlaps", signature = (*args, **kwargs))]
+fn rmsh_detect_gaps_overlaps_impl(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<pyo3::PyObject> {
@@ -1336,12 +1351,13 @@ fn model_occ_detect_gaps_overlaps_impl(
     })
 }
 
-// ── BRep validation ───────────────────────────────────────────────────────────
+// ── BRep validation (rmsh extension) ─────────────────────────────────────────
 
-/// Validate a CAD shape. Returns list of issue description strings (empty = valid).
+/// Validate a CAD shape (rmsh extension, no Gmsh equivalent).
+/// rmsh_check(tag) -> list of issue strings (empty = valid).
 #[pyfunction]
-#[pyo3(name = "model_occ_check", signature = (*args, **kwargs))]
-fn model_occ_check_impl(
+#[pyo3(name = "rmsh_check", signature = (*args, **kwargs))]
+fn rmsh_check_impl(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Vec<String>> {
@@ -1357,13 +1373,13 @@ fn model_occ_check_impl(
     Ok(result.issues.iter().map(|i| format!("{i:?}")).collect())
 }
 
-// ── Section (cross-section) ───────────────────────────────────────────────────
+// ── Section (rmsh extension) ──────────────────────────────────────────────────
 
-/// Compute cross-section of shape `tag` with a plane defined by origin `(ox,oy,oz)`
-/// and normal `(nx,ny,nz)`. Returns list of polylines, each a list of (x,y,z) tuples.
+/// Compute cross-section polylines (rmsh extension, no Gmsh equivalent).
+/// rmsh_section(tag, ox, oy, oz, nx, ny, nz) -> list of polylines.
 #[pyfunction]
-#[pyo3(name = "model_occ_section", signature = (*args, **kwargs))]
-fn model_occ_section_impl(
+#[pyo3(name = "rmsh_section", signature = (*args, **kwargs))]
+fn rmsh_section_impl(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Vec<Vec<(f64, f64, f64)>>> {
@@ -1395,15 +1411,13 @@ fn model_occ_section_impl(
         .collect())
 }
 
-// ── HLR (hidden-line removal → SVG) ──────────────────────────────────────────
+// ── HLR SVG export (rmsh extension) ──────────────────────────────────────────
 
-/// Render shape `tag` as an SVG string using hidden-line removal.
-/// `camera_type`: "isometric" | "front" | "top" | "right" (default "isometric").
-/// `distance`: camera distance (default 5.0).
-/// Returns SVG string.
+/// Render shape as SVG via hidden-line removal (rmsh extension, no Gmsh equivalent).
+/// rmsh_to_svg(tag, camera_type="isometric", distance=5.0) -> svg string.
 #[pyfunction]
-#[pyo3(name = "model_occ_to_svg", signature = (*args, **kwargs))]
-fn model_occ_to_svg_impl(
+#[pyo3(name = "rmsh_to_svg", signature = (*args, **kwargs))]
+fn rmsh_to_svg_impl(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<String> {
@@ -1433,11 +1447,11 @@ fn model_occ_to_svg_impl(
 
 // ── Assembly STEP export ──────────────────────────────────────────────────────
 
-/// Write all current CAD shapes as a STEP assembly file.
-/// `path`: output file path. `name`: assembly name (default "assembly").
+/// Write all current CAD shapes as a STEP assembly file (rmsh extension, no Gmsh equivalent).
+/// rmsh_write_assembly(path, name="assembly")
 #[pyfunction]
-#[pyo3(name = "model_occ_write_assembly", signature = (*args, **kwargs))]
-fn model_occ_write_assembly_impl(
+#[pyo3(name = "rmsh_write_assembly", signature = (*args, **kwargs))]
+fn rmsh_write_assembly_impl(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<()> {
@@ -1539,17 +1553,16 @@ fn _rmsh(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(pyo3::wrap_pyfunction!(model_occ_get_properties_impl, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(model_occ_extrude_impl, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(model_occ_revolve_impl, m)?)?;
-    m.add_function(pyo3::wrap_pyfunction!(model_occ_fillet_edge_impl, m)?)?;
-    m.add_function(pyo3::wrap_pyfunction!(model_occ_fillet_edges_impl, m)?)?;
-    m.add_function(pyo3::wrap_pyfunction!(model_occ_chamfer_edge_impl, m)?)?;
-    m.add_function(pyo3::wrap_pyfunction!(model_occ_corner_blend_impl, m)?)?;
-    m.add_function(pyo3::wrap_pyfunction!(model_occ_repair_impl, m)?)?;
-    m.add_function(pyo3::wrap_pyfunction!(model_occ_imprint_impl, m)?)?;
-    m.add_function(pyo3::wrap_pyfunction!(model_occ_detect_gaps_overlaps_impl, m)?)?;
-    m.add_function(pyo3::wrap_pyfunction!(model_occ_check_impl, m)?)?;
-    m.add_function(pyo3::wrap_pyfunction!(model_occ_section_impl, m)?)?;
-    m.add_function(pyo3::wrap_pyfunction!(model_occ_to_svg_impl, m)?)?;
-    m.add_function(pyo3::wrap_pyfunction!(model_occ_write_assembly_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_occ_fillet_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_occ_chamfer_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_occ_heal_shapes_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(rmsh_corner_blend_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(rmsh_imprint_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(rmsh_detect_gaps_overlaps_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(rmsh_check_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(rmsh_section_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(rmsh_to_svg_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(rmsh_write_assembly_impl, m)?)?;
 
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
