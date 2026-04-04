@@ -11,10 +11,16 @@ use rcad_kernel::{BRep, geom::Plane};
 use rcad_algorithms::{
     BooleanOpType, boolean_op, geom_populate,
     brep_check::check,
+    brep_repair::repair,
     hlr::{hlr, hlr_to_svg, HlrCamera},
+    imprint::{detect_gaps_overlaps, imprint_brep},
     section::section_polylines,
 };
-use rcad_modeling::builder::ops::{extrude, revolve};
+use rcad_modeling::builder::{
+    cone_brep, torus_brep,
+    fillet::{chamfer_edge, corner_blend, fillet_edge, fillet_edges},
+    ops::{extrude, revolve},
+};
 use rcad_step::assembly::{write_assembly, AssemblyComponent};
 use rmsh_algo::{CentroidStarMesher3D, MeshParams, Mesher3D, Polygon2D, mesh_polygon};
 use rmsh_model::{Element, ElementType, Mesh, Node};
@@ -1003,6 +1009,333 @@ fn model_occ_revolve_impl(
     Ok(new_tag)
 }
 
+// ── Cone / Torus ──────────────────────────────────────────────────────────────
+
+/// Add a cone with base center at (x,y,z), axis direction (dx,dy,dz), base radius r, height h.
+/// Returns an integer tag for the new shape.
+#[pyfunction]
+#[pyo3(name = "model_occ_add_cone", signature = (*args, **kwargs))]
+fn model_occ_add_cone_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<i32> {
+    let x: f64 = extract_required(args, kwargs, 0, &["x"], "float")?;
+    let y: f64 = extract_required(args, kwargs, 1, &["y"], "float")?;
+    let z: f64 = extract_required(args, kwargs, 2, &["z"], "float")?;
+    let dx: f64 = extract_required(args, kwargs, 3, &["dx"], "float")?;
+    let dy: f64 = extract_required(args, kwargs, 4, &["dy"], "float")?;
+    let dz: f64 = extract_required(args, kwargs, 5, &["dz"], "float")?;
+    let r: f64 = extract_required(args, kwargs, 6, &["r"], "float")?;
+    let tag: i32 = extract_required(args, kwargs, 7, &["tag"], "int").unwrap_or(-1);
+
+    let axis_vec = DVec3::new(dx, dy, dz);
+    let height = axis_vec.length();
+    if height < 1e-15 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "cone axis direction (dx, dy, dz) must be non-zero",
+        ));
+    }
+    let axis_norm = axis_vec.normalize();
+    let ref_dir = if axis_norm.x.abs() < 0.9 { DVec3::X } else { DVec3::Y };
+
+    let mut state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    ensure_initialized(&state)?;
+
+    let mut shape = cone_brep(DVec3::new(x, y, z), axis_norm, ref_dir, r, height)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    geom_populate::populate_box_geom(&mut shape);
+
+    let assigned_tag = if tag > 0 { tag } else { state.next_cad_tag + 1 };
+    state.next_cad_tag = assigned_tag.max(state.next_cad_tag);
+    state.cad_shapes.insert(assigned_tag, shape);
+    Ok(assigned_tag)
+}
+
+/// Add a torus with center at (x,y,z), axis direction (dx,dy,dz),
+/// major radius R and tube radius r.
+/// Returns an integer tag for the new shape.
+#[pyfunction]
+#[pyo3(name = "model_occ_add_torus", signature = (*args, **kwargs))]
+fn model_occ_add_torus_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<i32> {
+    let x: f64 = extract_required(args, kwargs, 0, &["x"], "float")?;
+    let y: f64 = extract_required(args, kwargs, 1, &["y"], "float")?;
+    let z: f64 = extract_required(args, kwargs, 2, &["z"], "float")?;
+    let dx: f64 = extract_required(args, kwargs, 3, &["dx"], "float").unwrap_or(0.0);
+    let dy: f64 = extract_required(args, kwargs, 4, &["dy"], "float").unwrap_or(0.0);
+    let dz: f64 = extract_required(args, kwargs, 5, &["dz"], "float").unwrap_or(1.0);
+    let r1: f64 = extract_required(args, kwargs, 6, &["r1"], "float")?;
+    let r2: f64 = extract_required(args, kwargs, 7, &["r2"], "float")?;
+    let tag: i32 = extract_required(args, kwargs, 8, &["tag"], "int").unwrap_or(-1);
+
+    let axis_vec = DVec3::new(dx, dy, dz);
+    let axis_norm = if axis_vec.length_squared() < 1e-20 {
+        DVec3::Z
+    } else {
+        axis_vec.normalize()
+    };
+    let ref_dir = if axis_norm.x.abs() < 0.9 { DVec3::X } else { DVec3::Y };
+
+    let mut state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    ensure_initialized(&state)?;
+
+    let shape = torus_brep(DVec3::new(x, y, z), axis_norm, ref_dir, r1, r2)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+
+    let assigned_tag = if tag > 0 { tag } else { state.next_cad_tag + 1 };
+    state.next_cad_tag = assigned_tag.max(state.next_cad_tag);
+    state.cad_shapes.insert(assigned_tag, shape);
+    Ok(assigned_tag)
+}
+
+// ── Fillet / Chamfer ──────────────────────────────────────────────────────────
+
+/// Fillet edge `edge_idx` of shape `tag` with `radius`.
+/// Returns a new tag for the modified shape.
+#[pyfunction]
+#[pyo3(name = "model_occ_fillet_edge", signature = (*args, **kwargs))]
+fn model_occ_fillet_edge_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<i32> {
+    let tag: i32 = extract_required(args, kwargs, 0, &["tag"], "int")?;
+    let edge_idx: usize = extract_required(args, kwargs, 1, &["edge_idx"], "int")?;
+    let radius: f64 = extract_required(args, kwargs, 2, &["radius"], "float")?;
+
+    let mut state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    ensure_initialized(&state)?;
+    let base = state.cad_shapes.get(&tag).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!("no shape with tag {tag}"))
+    })?.clone();
+
+    let result = fillet_edge(&base, edge_idx, radius)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+
+    let new_tag = state.next_cad_tag + 1;
+    state.next_cad_tag = new_tag;
+    state.cad_shapes.insert(new_tag, result);
+    Ok(new_tag)
+}
+
+/// Fillet multiple edges of shape `tag` in one call.
+/// `edges` is a list of (edge_idx, radius) pairs.
+/// Returns a new tag for the modified shape.
+#[pyfunction]
+#[pyo3(name = "model_occ_fillet_edges", signature = (*args, **kwargs))]
+fn model_occ_fillet_edges_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<i32> {
+    let tag: i32 = extract_required(args, kwargs, 0, &["tag"], "int")?;
+    let edges_list: Vec<(usize, f64)> = {
+        let item = args.get_item(1)
+            .ok()
+            .or_else(|| kwargs.and_then(|kw| kw.get_item("edges").ok().flatten()));
+        match item {
+            Some(v) => v.extract::<Vec<(usize, f64)>>()
+                .map_err(|_| pyo3::exceptions::PyTypeError::new_err(
+                    "edges must be a list of (edge_idx: int, radius: float) tuples"
+                ))?,
+            None => return Err(pyo3::exceptions::PyTypeError::new_err(
+                "edges argument is required"
+            )),
+        }
+    };
+
+    let mut state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    ensure_initialized(&state)?;
+    let base = state.cad_shapes.get(&tag).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!("no shape with tag {tag}"))
+    })?.clone();
+
+    let result = fillet_edges(&base, &edges_list)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+
+    let new_tag = state.next_cad_tag + 1;
+    state.next_cad_tag = new_tag;
+    state.cad_shapes.insert(new_tag, result);
+    Ok(new_tag)
+}
+
+/// Chamfer edge `edge_idx` of shape `tag` by `dist` on each side.
+/// Returns a new tag for the modified shape.
+#[pyfunction]
+#[pyo3(name = "model_occ_chamfer_edge", signature = (*args, **kwargs))]
+fn model_occ_chamfer_edge_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<i32> {
+    let tag: i32 = extract_required(args, kwargs, 0, &["tag"], "int")?;
+    let edge_idx: usize = extract_required(args, kwargs, 1, &["edge_idx"], "int")?;
+    let dist: f64 = extract_required(args, kwargs, 2, &["dist"], "float")?;
+
+    let mut state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    ensure_initialized(&state)?;
+    let base = state.cad_shapes.get(&tag).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!("no shape with tag {tag}"))
+    })?.clone();
+
+    let result = chamfer_edge(&base, edge_idx, dist)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+
+    let new_tag = state.next_cad_tag + 1;
+    state.next_cad_tag = new_tag;
+    state.cad_shapes.insert(new_tag, result);
+    Ok(new_tag)
+}
+
+/// Blend (chamfer) a convex vertex corner by trimming `radius` from the three incident edges.
+/// Returns a new tag for the modified shape.
+#[pyfunction]
+#[pyo3(name = "model_occ_corner_blend", signature = (*args, **kwargs))]
+fn model_occ_corner_blend_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<i32> {
+    let tag: i32 = extract_required(args, kwargs, 0, &["tag"], "int")?;
+    let vertex_idx: usize = extract_required(args, kwargs, 1, &["vertex_idx"], "int")?;
+    let radius: f64 = extract_required(args, kwargs, 2, &["radius"], "float")?;
+
+    let mut state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    ensure_initialized(&state)?;
+    let base = state.cad_shapes.get(&tag).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!("no shape with tag {tag}"))
+    })?.clone();
+
+    let result = corner_blend(&base, vertex_idx, radius)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+
+    let new_tag = state.next_cad_tag + 1;
+    state.next_cad_tag = new_tag;
+    state.cad_shapes.insert(new_tag, result);
+    Ok(new_tag)
+}
+
+// ── BRep repair ───────────────────────────────────────────────────────────────
+
+/// Repair shape `tag`: merge close vertices, remove degenerate faces,
+/// recompute face normals, fix wire orientations.
+/// Updates the shape in-place and returns a report dict with counts.
+#[pyfunction]
+#[pyo3(name = "model_occ_repair", signature = (*args, **kwargs))]
+fn model_occ_repair_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<pyo3::PyObject> {
+    let tag: i32 = extract_required(args, kwargs, 0, &["tag"], "int")?;
+    let tolerance: f64 = extract_required(args, kwargs, 1, &["tolerance"], "float")
+        .unwrap_or(1e-6);
+
+    let mut state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    ensure_initialized(&state)?;
+    let brep = state.cad_shapes.get_mut(&tag).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!("no shape with tag {tag}"))
+    })?;
+
+    let (repaired, report) = repair(brep, tolerance);
+    *brep = repaired;
+
+    Python::with_gil(|py| {
+        let dict = pyo3::types::PyDict::new(py);
+        dict.set_item("vertices_merged", report.vertices_merged)?;
+        dict.set_item("degenerate_faces_removed", report.degenerate_faces_removed)?;
+        dict.set_item("normals_recomputed", report.normals_recomputed)?;
+        dict.set_item("wires_fixed", report.wires_fixed)?;
+        Ok(dict.into())
+    })
+}
+
+// ── Imprint / gap detection ───────────────────────────────────────────────────
+
+/// Imprint shape B onto shape A (split A's faces by B's edges).
+/// Returns a new tag for the imprinted A.
+#[pyfunction]
+#[pyo3(name = "model_occ_imprint", signature = (*args, **kwargs))]
+fn model_occ_imprint_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<i32> {
+    let tag_a: i32 = extract_required(args, kwargs, 0, &["tag_a"], "int")?;
+    let tag_b: i32 = extract_required(args, kwargs, 1, &["tag_b"], "int")?;
+
+    let mut state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    ensure_initialized(&state)?;
+    let a = state.cad_shapes.get(&tag_a).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!("no shape with tag {tag_a}"))
+    })?.clone();
+    let b = state.cad_shapes.get(&tag_b).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!("no shape with tag {tag_b}"))
+    })?.clone();
+
+    let result = imprint_brep(&a, &b);
+
+    let new_tag = state.next_cad_tag + 1;
+    state.next_cad_tag = new_tag;
+    state.cad_shapes.insert(new_tag, result.brep);
+    Ok(new_tag)
+}
+
+/// Detect gaps and overlaps between shapes `tag_a` and `tag_b`.
+/// Returns a dict with `gaps: [(ax,ay,az, bx,by,bz, distance), ...]`
+/// and `overlaps: [(ax,ay,az, bx,by,bz, depth), ...]`.
+#[pyfunction]
+#[pyo3(name = "model_occ_detect_gaps_overlaps", signature = (*args, **kwargs))]
+fn model_occ_detect_gaps_overlaps_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<pyo3::PyObject> {
+    let tag_a: i32 = extract_required(args, kwargs, 0, &["tag_a"], "int")?;
+    let tag_b: i32 = extract_required(args, kwargs, 1, &["tag_b"], "int")?;
+    let tolerance: f64 = extract_required(args, kwargs, 2, &["tolerance"], "float")
+        .unwrap_or(1e-3);
+
+    let state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    ensure_initialized(&state)?;
+    let a = state.cad_shapes.get(&tag_a).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!("no shape with tag {tag_a}"))
+    })?;
+    let b = state.cad_shapes.get(&tag_b).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!("no shape with tag {tag_b}"))
+    })?;
+
+    let report = detect_gaps_overlaps(a, b, tolerance);
+
+    Python::with_gil(|py| {
+        let dict = pyo3::types::PyDict::new(py);
+        let gaps: Vec<(usize, usize, f64, f64, f64, f64)> = report.gaps.iter().map(|g| {
+            (g.face_a, g.face_b, g.max_gap, g.sample_point.x, g.sample_point.y, g.sample_point.z)
+        }).collect();
+        let overlaps: Vec<(usize, usize, f64)> = report.overlaps.iter().map(|o| {
+            (o.face_a, o.face_b, o.penetration_depth)
+        }).collect();
+        let shared: Vec<(usize, usize)> = report.shared_faces.clone();
+        dict.set_item("gaps", gaps)?;
+        dict.set_item("overlaps", overlaps)?;
+        dict.set_item("shared_faces", shared)?;
+        Ok(dict.into())
+    })
+}
+
 // ── BRep validation ───────────────────────────────────────────────────────────
 
 /// Validate a CAD shape. Returns list of issue description strings (empty = valid).
@@ -1177,6 +1510,8 @@ fn _rmsh(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(pyo3::wrap_pyfunction!(model_occ_add_box_impl, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(model_occ_add_sphere_impl, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(model_occ_add_cylinder_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_occ_add_cone_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_occ_add_torus_impl, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(model_occ_cut_impl, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(model_occ_fuse_impl, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(model_occ_fragment_impl, m)?)?;
@@ -1204,6 +1539,13 @@ fn _rmsh(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(pyo3::wrap_pyfunction!(model_occ_get_properties_impl, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(model_occ_extrude_impl, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(model_occ_revolve_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_occ_fillet_edge_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_occ_fillet_edges_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_occ_chamfer_edge_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_occ_corner_blend_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_occ_repair_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_occ_imprint_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_occ_detect_gaps_overlaps_impl, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(model_occ_check_impl, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(model_occ_section_impl, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(model_occ_to_svg_impl, m)?)?;

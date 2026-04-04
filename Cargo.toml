@@ -7,11 +7,12 @@ members = [
     "crates/renderer",
     "crates/viewer",
     "crates/py",
-    "vendor/rcad2/libs/rcad-kernel",
-    "vendor/rcad2/libs/rcad-modeling",
-    "vendor/rcad2/libs/rcad-algorithms",
-    "vendor/rcad2/libs/rcad-step",
-    "vendor/rcad2/libs/rcad-render",
+    "vendor/rcad/libs/rcad-kernel",
+    "vendor/rcad/libs/rcad-modeling",
+    "vendor/rcad/libs/rcad-algorithms",
+    "vendor/rcad/libs/rcad-step",
+    "vendor/rcad/libs/rcad-render",
+    "vendor/rcad/libs/rcad-scene",
 ]
 resolver = "2"
 
@@ -28,11 +29,12 @@ rmsh-geo = { path = "crates/geo" }
 rmsh-io = { path = "crates/io" }
 rmsh-algo = { path = "crates/algo" }
 rmsh-renderer = { path = "crates/renderer" }
-rcad-kernel = { path = "vendor/rcad2/libs/rcad-kernel" }
-rcad-modeling = { path = "vendor/rcad2/libs/rcad-modeling" }
-rcad-algorithms = { path = "vendor/rcad2/libs/rcad-algorithms" }
-rcad-step = { path = "vendor/rcad2/libs/rcad-step" }
-rcad-render = { path = "vendor/rcad2/libs/rcad-render" }
+rcad-kernel = { path = "vendor/rcad/libs/rcad-kernel" }
+rcad-modeling = { path = "vendor/rcad/libs/rcad-modeling" }
+rcad-algorithms = { path = "vendor/rcad/libs/rcad-algorithms" }
+rcad-step = { path = "vendor/rcad/libs/rcad-step" }
+rcad-render = { path = "vendor/rcad/libs/rcad-render" }
+rcad-scene = { path = "vendor/rcad/libs/rcad-scene" }
 
 # Math
 nalgebra = { version = "0.33", features = ["serde-serialize"] }
