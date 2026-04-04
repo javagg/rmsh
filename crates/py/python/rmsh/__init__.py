@@ -276,6 +276,15 @@ def _model_occ_addBox(*args, **kwargs):
 
 model_occ.addBox = _model_occ_addBox
 
+def _model_occ_addRectangle(*args, **kwargs):
+    """addRectangle(x, y, z, dx, dy, tag=-1) -> tag
+    Create a planar rectangle surface in the XY plane (z offset by z).
+    Matches gmsh.model.occ.addRectangle.
+    """
+    return _invoke("model_occ_add_rectangle", *args, **kwargs)
+
+model_occ.addRectangle = _model_occ_addRectangle
+
 def _model_occ_addCylinder(*args, **kwargs):
     """rmshModelOccAddCylinder(x, y, z, dx, dy, dz, r, tag, ierr)"""
     return _invoke("model_occ_add_cylinder", *args, **kwargs)

@@ -17,7 +17,14 @@ use rcad_modeling::builder::{
     fillet::{chamfer_edge, fillet_edges},
     ops::{extrude, revolve},
 };
-use rmsh_algo::{CentroidStarMesher3D, MeshParams, Mesher3D, Polygon2D, mesh_polygon};
+use rmsh_algo::{
+    CentroidStarMesher3D, Delaunay3D, FrontalDelaunay2D, Frontal3D, Hxt3D,
+    Bamg2D, QuadPaving2D,
+    LaplacianSmooth,
+    MeshAlgoError, MeshOptimizer, MeshParams, Mesher2D, Mesher3D,
+    OptimizeParams, Polygon2D, mesh_polygon,
+    Domain2D,
+};
 use rmsh_model::{Element, ElementType, Mesh, Node};
 
 macro_rules! stub_pyfunction {
@@ -800,33 +807,51 @@ fn model_mesh_generate_impl(
         pyo3::exceptions::PyRuntimeError::new_err("no mesh loaded; call open() first")
     })?;
 
-    let char_len = option_number(&state, "Mesh.CharacteristicLengthMax")
+    // Resolve element size from options (new names take priority over deprecated ones)
+    let size_max = option_number(&state, "Mesh.MeshSizeMax")
+        .or_else(|| option_number(&state, "Mesh.CharacteristicLengthMax"))
+        .filter(|v| *v > 0.0 && *v < 1e20);
+    let size_min = option_number(&state, "Mesh.MeshSizeMin")
         .or_else(|| option_number(&state, "Mesh.CharacteristicLengthMin"))
+        .filter(|v| *v > 0.0);
+    let size_factor = option_number(&state, "Mesh.MeshSizeFactor")
+        .or_else(|| option_number(&state, "Mesh.CharacteristicLengthFactor"))
         .filter(|v| *v > 0.0)
         .unwrap_or(1.0);
-    let mut params = MeshParams::with_size(char_len);
-    if let Some(v) = option_number(&state, "Mesh.CharacteristicLengthMin") {
-        if v > 0.0 {
-            params.min_size = v;
-        }
-    }
-    if let Some(v) = option_number(&state, "Mesh.CharacteristicLengthMax") {
-        if v > 0.0 {
-            params.max_size = v;
-        }
-    }
+
+    let base_size = size_max.unwrap_or(1.0) * size_factor;
+    let mut params = MeshParams::with_size(base_size);
+    if let Some(v) = size_min { params.min_size = v; }
+    if let Some(v) = size_max { params.max_size = v * size_factor; }
     if params.max_size < params.min_size {
         std::mem::swap(&mut params.max_size, &mut params.min_size);
     }
 
+    // Read algorithm selectors
+    let algo_2d = option_number(&state, "Mesh.Algorithm").map(|v| v as i32).unwrap_or(6);
+    let algo_3d = option_number(&state, "Mesh.Algorithm3D").map(|v| v as i32).unwrap_or(1);
+
+    let convert_err = |e: MeshAlgoError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string());
+
     let generated = if dim == 3 {
-        CentroidStarMesher3D
-            .mesh_3d(&surface, &params)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
+        // 3D algorithms: 1=Delaunay, 4=Frontal, 10=HXT, else=CentroidStar(default)
+        match algo_3d {
+            1 => Delaunay3D::default().mesh_3d(&surface, &params).map_err(convert_err)?,
+            4 => Frontal3D::default().mesh_3d(&surface, &params).map_err(convert_err)?,
+            10 => Hxt3D::default().mesh_3d(&surface, &params).map_err(convert_err)?,
+            _ => CentroidStarMesher3D.mesh_3d(&surface, &params).map_err(convert_err)?,
+        }
     } else if dim == 2 {
         let polygon = boundary_loop_from_surface_mesh(&surface)?;
-        mesh_polygon(&Polygon2D::new(polygon), params.element_size)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
+        let domain = Domain2D::from_outer(polygon);
+        // 2D algorithms: 5/6=Frontal-Delaunay, 7=BAMG, 8/9=Quad, else=basic triangulate
+        match algo_2d {
+            5 | 6 => FrontalDelaunay2D::default().mesh_2d(&domain, &params).map_err(convert_err)?,
+            7 => Bamg2D::default().mesh_2d(&domain, &params).map_err(convert_err)?,
+            8 | 9 => QuadPaving2D::default().mesh_2d(&domain, &params).map_err(convert_err)?,
+            _ => mesh_polygon(&Polygon2D::new(domain.outer().to_vec()), params.element_size)
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?,
+        }
     } else {
         return Err(PyNotImplementedError::new_err(
             "only dim=2 and dim=3 are currently implemented",
@@ -835,11 +860,54 @@ fn model_mesh_generate_impl(
     state.current_mesh = Some(generated);
     Ok(())
 }
+
 stub_pyfunction!(model_mesh_set_order_impl, "model_mesh_set_order", "rmshModelMeshSetOrder(int order, int *ierr)");
 stub_pyfunction!(model_mesh_get_nodes_impl, "model_mesh_get_nodes", "rmshModelMeshGetNodes(size_t *nodeTags_n, size_t *coord_n, size_t *parametricCoord_n, int dim, int tag, int includeBoundary, int returnParametricCoord, int *ierr)");
 stub_pyfunction!(model_mesh_get_elements_impl, "model_mesh_get_elements", "rmshModelMeshGetElements(size_t *elementTypes_n, size_t *elementTags_n, size_t *nodeTags_n, int dim, int tag, int *ierr)");
 stub_pyfunction!(model_mesh_clear_impl, "model_mesh_clear", "rmshModelMeshClear(const int *dimTags, size_t dimTags_n, int *ierr)");
-stub_pyfunction!(model_mesh_optimize_impl, "model_mesh_optimize", "rmshModelMeshOptimize(const char *method, int force, int niter, const int *dimTags, size_t dimTags_n, int *ierr)");
+
+#[pyfunction]
+#[pyo3(name = "model_mesh_optimize", signature = (*args, **kwargs))]
+fn model_mesh_optimize_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<()> {
+    let method: String = if args.len() > 0 || kwargs.map(|k| k.contains("method").unwrap_or(false)).unwrap_or(false) {
+        extract_required(args, kwargs, 0, &["method"], "str").unwrap_or_else(|_| "Laplace".to_string())
+    } else {
+        "Laplace".to_string()
+    };
+    let niter: u32 = extract_required(args, kwargs, 2, &["niter"], "int").unwrap_or(10);
+
+    let mut state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    ensure_initialized(&state)?;
+    let mesh = state.current_mesh.as_mut().ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err("no mesh loaded")
+    })?;
+
+    let params = OptimizeParams {
+        iterations: niter,
+        ..Default::default()
+    };
+
+    match method.as_str() {
+        "Laplace" | "Laplacian" | "" => {
+            LaplacianSmooth::default()
+                .optimize(mesh, &params)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        }
+        other => {
+            return Err(PyNotImplementedError::new_err(format!(
+                "optimizer '{}' not yet implemented; available: Laplace",
+                other
+            )));
+        }
+    }
+    Ok(())
+}
+
 stub_pyfunction!(model_mesh_refine_impl, "model_mesh_refine", "rmshModelMeshRefine(int *ierr)");
 stub_pyfunction!(model_mesh_recombine_impl, "model_mesh_recombine", "rmshModelMeshRecombine(int dim, int tag, double angle, int *ierr)");
 
@@ -1098,7 +1166,49 @@ fn model_occ_add_torus_impl(
     Ok(assigned_tag)
 }
 
-// ── Fillet / Chamfer (Gmsh-compatible) ───────────────────────────────────────
+// ── Rectangle (2D domain for surface meshing) ─────────────────────────────────
+
+/// Add a planar rectangle in the XY plane.
+/// Signature matches gmsh.model.occ.addRectangle:
+///   addRectangle(x, y, z, dx, dy, tag=-1) -> tag
+///
+/// Unlike addBox this creates a *surface* entity (2D boundary mesh in current_mesh)
+/// suitable for 2D meshing with model.mesh.generate(2).
+#[pyfunction]
+#[pyo3(name = "model_occ_add_rectangle", signature = (*args, **kwargs))]
+fn model_occ_add_rectangle_impl(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<i32> {
+    let x: f64  = extract_required(args, kwargs, 0, &["x"],  "float")?;
+    let y: f64  = extract_required(args, kwargs, 1, &["y"],  "float")?;
+    let _z: f64 = extract_required(args, kwargs, 2, &["z"],  "float").unwrap_or(0.0);
+    let dx: f64 = extract_required(args, kwargs, 3, &["dx"], "float")?;
+    let dy: f64 = extract_required(args, kwargs, 4, &["dy"], "float")?;
+    let tag: i32 = extract_required(args, kwargs, 5, &["tag"], "int").unwrap_or(-1);
+
+    // Build a single quad boundary mesh of 2 triangles representing the rectangle
+    let mut mesh = Mesh::new();
+    // Nodes: four corners
+    mesh.add_node(Node::new(1, x,      y,      0.0));
+    mesh.add_node(Node::new(2, x + dx, y,      0.0));
+    mesh.add_node(Node::new(3, x + dx, y + dy, 0.0));
+    mesh.add_node(Node::new(4, x,      y + dy, 0.0));
+    // Two triangles to fill the rectangle
+    mesh.add_element(Element::new(1, ElementType::Triangle3, vec![1, 2, 3]));
+    mesh.add_element(Element::new(2, ElementType::Triangle3, vec![1, 3, 4]));
+
+    let mut state = STATE
+        .lock()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
+    ensure_initialized(&state)?;
+
+    let assigned_tag = if tag > 0 { tag } else { state.next_cad_tag + 1 };
+    state.next_cad_tag = assigned_tag.max(state.next_cad_tag);
+    // Store surface mesh as current_mesh so generate(2) can use it
+    state.current_mesh = Some(mesh);
+    Ok(assigned_tag)
+}
 
 /// Round the edges of a volume.
 /// Signature matches gmsh.model.occ.fillet:
@@ -1292,6 +1402,7 @@ fn _rmsh(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(pyo3::wrap_pyfunction!(model_occ_add_cylinder_impl, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(model_occ_add_cone_impl, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(model_occ_add_torus_impl, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(model_occ_add_rectangle_impl, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(model_occ_cut_impl, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(model_occ_fuse_impl, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(model_occ_fragment_impl, m)?)?;
