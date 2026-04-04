@@ -1,4 +1,4 @@
-use pyo3::exceptions::PyNotImplementedError;
+﻿use pyo3::exceptions::PyNotImplementedError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 use std::collections::{HashMap, HashSet};
@@ -7,21 +7,16 @@ use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use glam::DVec3;
-use rcad_kernel::{BRep, geom::Plane};
+use rcad_kernel::BRep;
 use rcad_algorithms::{
     BooleanOpType, boolean_op, geom_populate,
-    brep_check::check,
     brep_repair::repair,
-    hlr::{hlr, hlr_to_svg, HlrCamera},
-    imprint::{detect_gaps_overlaps, imprint_brep},
-    section::section_polylines,
 };
 use rcad_modeling::builder::{
     cone_brep, torus_brep,
-    fillet::{chamfer_edge, corner_blend, fillet_edge, fillet_edges},
+    fillet::{chamfer_edge, fillet_edges},
     ops::{extrude, revolve},
 };
-use rcad_step::assembly::{write_assembly, AssemblyComponent};
 use rmsh_algo::{CentroidStarMesher3D, MeshParams, Mesher3D, Polygon2D, mesh_polygon};
 use rmsh_model::{Element, ElementType, Mesh, Node};
 
@@ -1248,240 +1243,6 @@ fn model_occ_heal_shapes_impl(
     })
 }
 
-// ── rmsh extensions (no Gmsh equivalent) ─────────────────────────────────────
-
-/// Blend a convex vertex corner (rmsh extension, no Gmsh equivalent).
-/// rmsh_corner_blend(tag, vertex_idx, radius) -> new_tag
-#[pyfunction]
-#[pyo3(name = "rmsh_corner_blend", signature = (*args, **kwargs))]
-fn rmsh_corner_blend_impl(
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<i32> {
-    let tag: i32 = extract_required(args, kwargs, 0, &["tag"], "int")?;
-    let vertex_idx: usize = extract_required(args, kwargs, 1, &["vertex_idx"], "int")?;
-    let radius: f64 = extract_required(args, kwargs, 2, &["radius"], "float")?;
-
-    let mut state = STATE
-        .lock()
-        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
-    ensure_initialized(&state)?;
-    let base = state.cad_shapes.get(&tag).ok_or_else(|| {
-        pyo3::exceptions::PyValueError::new_err(format!("no shape with tag {tag}"))
-    })?.clone();
-
-    let result = corner_blend(&base, vertex_idx, radius)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-
-    let new_tag = state.next_cad_tag + 1;
-    state.next_cad_tag = new_tag;
-    state.cad_shapes.insert(new_tag, result);
-    Ok(new_tag)
-}
-
-/// Imprint shape B onto shape A (rmsh extension, no Gmsh equivalent).
-/// rmsh_imprint(tag_a, tag_b) -> new_tag
-#[pyfunction]
-#[pyo3(name = "rmsh_imprint", signature = (*args, **kwargs))]
-fn rmsh_imprint_impl(
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<i32> {
-    let tag_a: i32 = extract_required(args, kwargs, 0, &["tag_a"], "int")?;
-    let tag_b: i32 = extract_required(args, kwargs, 1, &["tag_b"], "int")?;
-
-    let mut state = STATE
-        .lock()
-        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
-    ensure_initialized(&state)?;
-    let a = state.cad_shapes.get(&tag_a).ok_or_else(|| {
-        pyo3::exceptions::PyValueError::new_err(format!("no shape with tag {tag_a}"))
-    })?.clone();
-    let b = state.cad_shapes.get(&tag_b).ok_or_else(|| {
-        pyo3::exceptions::PyValueError::new_err(format!("no shape with tag {tag_b}"))
-    })?.clone();
-
-    let result = imprint_brep(&a, &b);
-
-    let new_tag = state.next_cad_tag + 1;
-    state.next_cad_tag = new_tag;
-    state.cad_shapes.insert(new_tag, result.brep);
-    Ok(new_tag)
-}
-
-/// Detect gaps and overlaps between two shapes (rmsh extension, no Gmsh equivalent).
-/// rmsh_detect_gaps_overlaps(tag_a, tag_b, tolerance=1e-3) -> dict
-#[pyfunction]
-#[pyo3(name = "rmsh_detect_gaps_overlaps", signature = (*args, **kwargs))]
-fn rmsh_detect_gaps_overlaps_impl(
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<pyo3::PyObject> {
-    let tag_a: i32 = extract_required(args, kwargs, 0, &["tag_a"], "int")?;
-    let tag_b: i32 = extract_required(args, kwargs, 1, &["tag_b"], "int")?;
-    let tolerance: f64 = extract_required(args, kwargs, 2, &["tolerance"], "float")
-        .unwrap_or(1e-3);
-
-    let state = STATE
-        .lock()
-        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
-    ensure_initialized(&state)?;
-    let a = state.cad_shapes.get(&tag_a).ok_or_else(|| {
-        pyo3::exceptions::PyValueError::new_err(format!("no shape with tag {tag_a}"))
-    })?;
-    let b = state.cad_shapes.get(&tag_b).ok_or_else(|| {
-        pyo3::exceptions::PyValueError::new_err(format!("no shape with tag {tag_b}"))
-    })?;
-
-    let report = detect_gaps_overlaps(a, b, tolerance);
-
-    Python::with_gil(|py| {
-        let dict = pyo3::types::PyDict::new(py);
-        let gaps: Vec<(usize, usize, f64, f64, f64, f64)> = report.gaps.iter().map(|g| {
-            (g.face_a, g.face_b, g.max_gap, g.sample_point.x, g.sample_point.y, g.sample_point.z)
-        }).collect();
-        let overlaps: Vec<(usize, usize, f64)> = report.overlaps.iter().map(|o| {
-            (o.face_a, o.face_b, o.penetration_depth)
-        }).collect();
-        let shared: Vec<(usize, usize)> = report.shared_faces.clone();
-        dict.set_item("gaps", gaps)?;
-        dict.set_item("overlaps", overlaps)?;
-        dict.set_item("shared_faces", shared)?;
-        Ok(dict.into())
-    })
-}
-
-// ── BRep validation (rmsh extension) ─────────────────────────────────────────
-
-/// Validate a CAD shape (rmsh extension, no Gmsh equivalent).
-/// rmsh_check(tag) -> list of issue strings (empty = valid).
-#[pyfunction]
-#[pyo3(name = "rmsh_check", signature = (*args, **kwargs))]
-fn rmsh_check_impl(
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Vec<String>> {
-    let tag: i32 = extract_required(args, kwargs, 0, &["tag"], "int")?;
-    let state = STATE
-        .lock()
-        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
-    ensure_initialized(&state)?;
-    let brep = state.cad_shapes.get(&tag).ok_or_else(|| {
-        pyo3::exceptions::PyValueError::new_err(format!("no shape with tag {tag}"))
-    })?;
-    let result = check(brep);
-    Ok(result.issues.iter().map(|i| format!("{i:?}")).collect())
-}
-
-// ── Section (rmsh extension) ──────────────────────────────────────────────────
-
-/// Compute cross-section polylines (rmsh extension, no Gmsh equivalent).
-/// rmsh_section(tag, ox, oy, oz, nx, ny, nz) -> list of polylines.
-#[pyfunction]
-#[pyo3(name = "rmsh_section", signature = (*args, **kwargs))]
-fn rmsh_section_impl(
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Vec<Vec<(f64, f64, f64)>>> {
-    let tag: i32 = extract_required(args, kwargs, 0, &["tag"], "int")?;
-    let ox: f64 = extract_required(args, kwargs, 1, &["ox"], "float")?;
-    let oy: f64 = extract_required(args, kwargs, 2, &["oy"], "float")?;
-    let oz: f64 = extract_required(args, kwargs, 3, &["oz"], "float")?;
-    let nx: f64 = extract_required(args, kwargs, 4, &["nx"], "float")?;
-    let ny: f64 = extract_required(args, kwargs, 5, &["ny"], "float")?;
-    let nz: f64 = extract_required(args, kwargs, 6, &["nz"], "float")?;
-
-    let state = STATE
-        .lock()
-        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
-    ensure_initialized(&state)?;
-    let brep = state.cad_shapes.get(&tag).ok_or_else(|| {
-        pyo3::exceptions::PyValueError::new_err(format!("no shape with tag {tag}"))
-    })?;
-
-    let normal = DVec3::new(nx, ny, nz).normalize_or_zero();
-    if normal.length_squared() < 1e-12 {
-        return Err(pyo3::exceptions::PyValueError::new_err("section plane normal must be non-zero"));
-    }
-    let plane = Plane { origin: DVec3::new(ox, oy, oz), normal };
-    let polylines = section_polylines(brep, &plane);
-    Ok(polylines
-        .into_iter()
-        .map(|pts| pts.into_iter().map(|p| (p.x, p.y, p.z)).collect())
-        .collect())
-}
-
-// ── HLR SVG export (rmsh extension) ──────────────────────────────────────────
-
-/// Render shape as SVG via hidden-line removal (rmsh extension, no Gmsh equivalent).
-/// rmsh_to_svg(tag, camera_type="isometric", distance=5.0) -> svg string.
-#[pyfunction]
-#[pyo3(name = "rmsh_to_svg", signature = (*args, **kwargs))]
-fn rmsh_to_svg_impl(
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<String> {
-    let tag: i32 = extract_required(args, kwargs, 0, &["tag"], "int")?;
-    let camera_type: String = extract_required(args, kwargs, 1, &["camera_type"], "str")
-        .unwrap_or_else(|_| "isometric".to_string());
-    let distance: f64 = extract_required(args, kwargs, 2, &["distance"], "float")
-        .unwrap_or(5.0);
-
-    let state = STATE
-        .lock()
-        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
-    ensure_initialized(&state)?;
-    let brep = state.cad_shapes.get(&tag).ok_or_else(|| {
-        pyo3::exceptions::PyValueError::new_err(format!("no shape with tag {tag}"))
-    })?;
-
-    let camera = match camera_type.to_lowercase().as_str() {
-        "front" => HlrCamera::front(distance),
-        "top" => HlrCamera::top(distance),
-        "right" => HlrCamera::right(distance),
-        _ => HlrCamera::isometric(distance),
-    };
-    let result = hlr(brep, &camera, 32);
-    Ok(hlr_to_svg(&result, 200.0, 20.0))
-}
-
-// ── Assembly STEP export ──────────────────────────────────────────────────────
-
-/// Write all current CAD shapes as a STEP assembly file (rmsh extension, no Gmsh equivalent).
-/// rmsh_write_assembly(path, name="assembly")
-#[pyfunction]
-#[pyo3(name = "rmsh_write_assembly", signature = (*args, **kwargs))]
-fn rmsh_write_assembly_impl(
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<()> {
-    let path: String = extract_required(args, kwargs, 0, &["path", "fileName"], "str")?;
-    let name: String = extract_required(args, kwargs, 1, &["name"], "str")
-        .unwrap_or_else(|_| "assembly".to_string());
-
-    let state = STATE
-        .lock()
-        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("rmsh state lock poisoned"))?;
-    ensure_initialized(&state)?;
-
-    let mut components: Vec<AssemblyComponent> = state
-        .cad_shapes
-        .iter()
-        .map(|(tag, brep)| AssemblyComponent::new(format!("part_{tag}"), brep.clone()))
-        .collect();
-    // Sort by tag for deterministic output
-    components.sort_by_key(|c| c.name.clone());
-
-    if components.is_empty() {
-        return Err(pyo3::exceptions::PyRuntimeError::new_err(
-            "no CAD shapes to export; call model_occ_add_* first",
-        ));
-    }
-
-    let step_text = write_assembly(&name, &components);
-    std::fs::write(&path, step_text)
-        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
-}
 fn _rmsh(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(pyo3::wrap_pyfunction!(initialize_impl, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(finalize_impl, m)?)?;
@@ -1556,13 +1317,6 @@ fn _rmsh(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(pyo3::wrap_pyfunction!(model_occ_fillet_impl, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(model_occ_chamfer_impl, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(model_occ_heal_shapes_impl, m)?)?;
-    m.add_function(pyo3::wrap_pyfunction!(rmsh_corner_blend_impl, m)?)?;
-    m.add_function(pyo3::wrap_pyfunction!(rmsh_imprint_impl, m)?)?;
-    m.add_function(pyo3::wrap_pyfunction!(rmsh_detect_gaps_overlaps_impl, m)?)?;
-    m.add_function(pyo3::wrap_pyfunction!(rmsh_check_impl, m)?)?;
-    m.add_function(pyo3::wrap_pyfunction!(rmsh_section_impl, m)?)?;
-    m.add_function(pyo3::wrap_pyfunction!(rmsh_to_svg_impl, m)?)?;
-    m.add_function(pyo3::wrap_pyfunction!(rmsh_write_assembly_impl, m)?)?;
 
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
